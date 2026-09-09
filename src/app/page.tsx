@@ -1,69 +1,50 @@
-import Image from "next/image";
+﻿import Link from "next/link";
 
 export default function Home() {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <div className="min-h-screen bg-gradient-to-br from-blue-600 via-blue-500 to-purple-600 flex flex-col items-center justify-center gap-12 text-white font-sans">
+      <div className="text-center">
+        <h1 className="text-6xl font-black tracking-tight mb-4">🎯 Live Quiz Show</h1>
+        <p className="text-xl text-blue-100">Interactive quiz competition platform with real-time scoring, buzzer rounds, and team play</p>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 w-full max-w-4xl px-6">
+        <Link href="/admin"
+          className="group flex flex-col items-center gap-4 bg-white/20 backdrop-blur-sm hover:bg-white/30 border-2 border-white/30 hover:border-white/50 rounded-2xl p-8 transition-all duration-300 transform hover:scale-105 hover:shadow-2xl">
+          <div className="relative">
+            <div className="absolute inset-0 bg-blue-400 rounded-2xl blur opacity-50 group-hover:opacity-75 transition group-hover:scale-110"></div>
+            <span className="relative text-5xl">🛠️</span>
+          </div>
+          <span className="font-bold text-2xl text-white">Admin</span>
+          <span className="text-sm text-blue-50 text-center leading-relaxed">Create quizzes, manage questions, configure rounds, and run live sessions</span>
+        </Link>
+
+        <Link href="/host"
+          className="group flex flex-col items-center gap-4 bg-white/20 backdrop-blur-sm hover:bg-white/30 border-2 border-white/30 hover:border-white/50 rounded-2xl p-8 transition-all duration-300 transform hover:scale-105 hover:shadow-2xl">
+          <div className="relative">
+            <div className="absolute inset-0 bg-purple-400 rounded-2xl blur opacity-50 group-hover:opacity-75 transition group-hover:scale-110"></div>
+            <span className="relative text-5xl">🎙️</span>
+          </div>
+          <span className="font-bold text-2xl text-white">Host</span>
+          <span className="text-sm text-blue-50 text-center leading-relaxed">Control the quiz flow, reveal answers, and manage scoring</span>
+        </Link>
+
+        <Link href="/team"
+          className="group flex flex-col items-center gap-4 bg-white/20 backdrop-blur-sm hover:bg-white/30 border-2 border-white/30 hover:border-white/50 rounded-2xl p-8 transition-all duration-300 transform hover:scale-105 hover:shadow-2xl">
+          <div className="relative">
+            <div className="absolute inset-0 bg-orange-400 rounded-2xl blur opacity-50 group-hover:opacity-75 transition group-hover:scale-110"></div>
+            <span className="relative text-5xl">🔔</span>
+          </div>
+          <span className="font-bold text-2xl text-white">Team</span>
+          <span className="text-sm text-blue-50 text-center leading-relaxed">Answer questions, buzz in, and compete with other teams</span>
+        </Link>
+      </div>
+
+      <div className="mt-8 text-center">
+        <p className="text-blue-100 text-sm">
+          Built for interactive quiz shows, competitions, and classroom engagement
+        </p>
+      </div>
     </div>
   );
 }
