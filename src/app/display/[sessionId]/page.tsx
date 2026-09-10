@@ -8,6 +8,7 @@ import { questionTypeForRound } from '@/lib/questionSet';
 import { arabicClass, arabicDir } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
 import { questionImages } from '@/lib/media';
+import { warmDbClock, dbNowMs } from '@/lib/serverClock';
 
 // No `answer` field: the correct answer is fetched only once the host reveals it (see the
 // revealedAnswer effect below). It used to be pulled in with the question itself, which put the
@@ -62,16 +63,22 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
 
   useEffect(() => { refreshBuzz(); }, [refreshBuzz]);
 
-  // Separate effect so the subscription always calls the CURRENT refreshBuzz. When this lived in
-  // the session effect above (deps: [sessionId]) it captured the very first render's version —
-  // the one where sessionData is still null — so every incoming buzz ran the early-return branch
-  // and cleared the list instead of filling it. The big screen never showed who buzzed at all.
+  // The handler is read through a ref, so this always calls the CURRENT refreshBuzz (when this
+  // lived in the session effect above it captured the first render's version, the one where
+  // sessionData is still null, and every incoming buzz hit the early return and cleared the list)
+  // WITHOUT re-subscribing the channel each time the question changes. Depending on refreshBuzz
+  // directly meant a teardown + re-subscribe per question, and buzzes arriving during that
+  // handshake never reached the projector at all.
+  const refreshBuzzRef = useRef(refreshBuzz);
+  useEffect(() => { refreshBuzzRef.current = refreshBuzz; }, [refreshBuzz]);
+
   useEffect(() => {
     const sub = supabase.channel(`display-buzz:${sessionId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` }, () => refreshBuzz())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` },
+        () => refreshBuzzRef.current())
       .subscribe();
     return () => { supabase.removeChannel(sub); };
-  }, [sessionId, refreshBuzz]);
+  }, [sessionId]);
 
   useEffect(() => {
     async function load() {
@@ -155,10 +162,17 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
     supabase.from('teams').select('name').eq('id', pickerId).single().then(({ data }) => setPickerTeamName(data?.name || null));
   }, [sessionData?.current_picker_team_id]);
 
+  // One clock for the whole show, and a tick only while something is actually counting down —
+  // this ran unconditionally before, re-rendering the projector view four times a second all night.
+  useEffect(() => { warmDbClock(sessionId); }, [sessionId]);
+
+  const timerRunning = !!sessionData?.timer_state?.startedAt && !sessionData?.timer_state?.paused;
   useEffect(() => {
-    const t = setInterval(() => setTimerNow(Date.now()), 250);
+    if (!timerRunning) return;
+    setTimerNow(dbNowMs());
+    const t = setInterval(() => setTimerNow(dbNowMs()), 250);
     return () => clearInterval(t);
-  }, []);
+  }, [timerRunning]);
 
   const [tier, setTier] = useState<TierResult>({ difficulty: null, categories: [], nextItemId: null, done: true });
   useEffect(() => {

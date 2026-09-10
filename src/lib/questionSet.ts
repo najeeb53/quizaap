@@ -145,7 +145,12 @@ export async function attachShuffledOptionOrder(items: Omit<GeneratedItem, 'opti
     const { data: opts } = await supabase.from('question_options').select('question_id, option_key').in('question_id', questionIds);
     for (const o of opts || []) (byQuestion[o.question_id] ||= []).push(o.option_key);
   }
-  return items.map(item => ({ ...item, option_order: byQuestion[item.question_id] ? shuffle(byQuestion[item.question_id]) : [] }));
+  // question_id is null for an unfilled team-picks-category slot; indexing with null coerced to the
+  // string key "null", which matched nothing.
+  return items.map(item => {
+    const keys = item.question_id ? byQuestion[item.question_id] : null;
+    return { ...item, option_order: keys ? shuffle(keys) : [] };
+  });
 }
 
 export async function saveQuestionSet(sessionId: string, roundId: string, items: GeneratedItem[]) {

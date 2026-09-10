@@ -8,6 +8,7 @@ import { arabicClass, arabicDir } from '@/lib/textDir';
 import { questionTypeForRound } from '@/lib/questionSet';
 import { playBuzzSound } from '@/lib/buzzSound';
 import { questionImages } from '@/lib/media';
+import { warmDbClock, dbNowMs } from '@/lib/serverClock';
 
 type Team = { id: string; quiz_id: string; name: string; pin_hash: string; eliminated_at: string | null };
 type Question = { id: string; text: string; type: string; media_url: string | null; media_urls?: string[] | null };
@@ -41,10 +42,6 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   const [revealedAnswer, setRevealedAnswer] = useState<string | null>(null);
   const [revealedSequence, setRevealedSequence] = useState<string[] | null>(null);
   const [timerNow, setTimerNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setTimerNow(Date.now()), 250);
-    return () => clearInterval(t);
-  }, []);
 
   // 1. resolve team
   useEffect(() => {
@@ -79,6 +76,10 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   }, [team]);
 
   useEffect(() => { if (authed) resolveSession(); }, [authed, resolveSession]);
+
+  // One clock for the whole show — so this phone's countdown matches the database timestamps the
+  // host and projector are scoring against, not this phone's own idea of the time.
+  useEffect(() => { if (sessionId) warmDbClock(sessionId); }, [sessionId]);
 
   // 3. subscribe to session state
   useEffect(() => {
@@ -196,13 +197,22 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
 
   useEffect(() => { refreshBuzzOrder(); }, [refreshBuzzOrder]);
 
+  // The handler is read through a ref so this channel subscribes ONCE per session. It used to
+  // depend on refreshBuzzOrder, which changes identity every time the question changes — so every
+  // new question tore the channel down and re-subscribed it, and buzzes landing during that
+  // handshake never arrived. That window falls exactly where it hurts most: the host opens the
+  // buzzer a moment after pushing the question, which is precisely when teams are slapping it.
+  const refreshBuzzOrderRef = useRef(refreshBuzzOrder);
+  useEffect(() => { refreshBuzzOrderRef.current = refreshBuzzOrder; }, [refreshBuzzOrder]);
+
   useEffect(() => {
     if (!sessionId) return;
     const sub = supabase.channel(`team-buzz:${sessionId}:${teamCode}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` }, () => refreshBuzzOrder())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` },
+        () => refreshBuzzOrderRef.current())
       .subscribe();
     return () => { supabase.removeChannel(sub); };
-  }, [sessionId, teamCode, refreshBuzzOrder]);
+  }, [sessionId, teamCode]);
 
   // myBuzz is DERIVED from the live buzz list rather than held as its own state. Held separately,
   // it was only ever cleared when the question changed — so after the host hit "Reset Buzzer"
@@ -218,8 +228,22 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   // clock at all on a normal question AND no time limit enforced — the option buttons stayed live
   // until the host got round to revealing, so an answer tapped well after time was up still
   // counted, which is unfair on the teams that answered honestly inside the limit.
-  let remaining: number | null = null;
   const ts = sessionData?.timer_state;
+
+  // Tick ONLY while a countdown is actually running. This interval used to run unconditionally for
+  // the life of the page, re-rendering this entire component four times a second — including
+  // through every buzzer round, which deliberately shows no clock at all. On a mid-range phone that
+  // is constant reconciliation work competing with the touch handler on the BUZZ button, for a
+  // number nobody is looking at.
+  const timerRunning = !!ts?.startedAt && !ts?.paused;
+  useEffect(() => {
+    if (!timerRunning) return;
+    setTimerNow(dbNowMs());
+    const t = setInterval(() => setTimerNow(dbNowMs()), 250);
+    return () => clearInterval(t);
+  }, [timerRunning]);
+
+  let remaining: number | null = null;
   if (ts?.startedAt && !ts.paused) {
     remaining = Math.max(0, Math.ceil((ts.duration ?? 0) - (timerNow - new Date(ts.startedAt).getTime()) / 1000));
   } else if (ts?.paused) {

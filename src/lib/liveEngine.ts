@@ -1,5 +1,6 @@
 import { supabase } from './supabaseClient';
 import { DIFFICULTY_ORDER, questionTypeForRound } from './questionSet';
+import { dbNow } from './serverClock';
 
 // ---- shared types ----
 export type LiveSession = {
@@ -38,9 +39,15 @@ async function logEvent(sessionId: string, eventType: string, payload: Record<st
 }
 
 /** A running timer_state for `seconds`, or {} (no timer) if the round has no timer configured —
- * used so the countdown starts the instant a question appears, instead of a separate manual click. */
-function autoStartTimerState(seconds: number | null | undefined) {
-  return seconds && seconds > 0 ? { duration: seconds, startedAt: new Date().toISOString(), paused: false, remaining: null } : {};
+ * used so the countdown starts the instant a question appears, instead of a separate manual click.
+ *
+ * startedAt is stamped on the DATABASE's clock, not this browser's. Everything it is later
+ * subtracted from — `answers.submitted_at`, `buzzer_events.buzzed_at` — is written by Postgres, so
+ * a host PC whose clock was a few seconds off used to make every Sequencing completion time come
+ * out wrong (see serverClock.ts). */
+async function autoStartTimerState(sessionId: string, seconds: number | null | undefined) {
+  if (!seconds || seconds <= 0) return {};
+  return { duration: seconds, startedAt: (await dbNow(sessionId)).toISOString(), paused: false, remaining: null };
 }
 
 // ---- round progression ----
@@ -81,7 +88,7 @@ export async function nextQuestion(sessionId: string, roundId: string, currentIt
   const { data: round } = await supabase.from('rounds').select('timer_seconds').eq('id', roundId).single();
   await supabase.from('live_sessions').update({
     current_question_set_item_id: next.id, display_state: 'question',
-    timer_state: autoStartTimerState(round?.timer_seconds),
+    timer_state: await autoStartTimerState(sessionId, round?.timer_seconds),
   }).eq('id', sessionId);
   await logEvent(sessionId, 'next_question', { itemId: next.id });
   return { done: false, itemId: next.id as string };
@@ -235,7 +242,7 @@ export async function pickCategory(sessionId: string, itemId: string, teamId: st
   if (!claimed || claimed.length === 0) throw new Error('That slot was just picked by someone else.');
   await supabase.from('live_sessions').update({
     current_question_set_item_id: itemId, display_state: 'question',
-    timer_state: autoStartTimerState(round?.timer_seconds),
+    timer_state: await autoStartTimerState(sessionId, round?.timer_seconds),
   }).eq('id', sessionId);
   await logEvent(sessionId, 'category_picked', { itemId, teamId, categoryId, questionId: chosen.id });
 }
@@ -243,7 +250,7 @@ export async function pickCategory(sessionId: string, itemId: string, teamId: st
 // ---- timer (server-authoritative-ish: we store startedAt + duration, all clients compute remaining) ----
 export async function startTimer(sessionId: string, seconds: number) {
   await supabase.from('live_sessions').update({
-    timer_state: { duration: seconds, startedAt: new Date().toISOString(), paused: false, remaining: null },
+    timer_state: { duration: seconds, startedAt: (await dbNow(sessionId)).toISOString(), paused: false, remaining: null },
   }).eq('id', sessionId);
 }
 
@@ -465,6 +472,15 @@ export async function gradeAndReveal(sessionId: string, itemId: string, roundId:
     correctOrder = (opts || []).map((o: any) => o.option_key);
   }
 
+  // Graded in memory first, then written in TWO bulk round trips — one for the answer rows, one
+  // for the score rows. This loop used to `await` an answer update AND a score insert per team, in
+  // sequence, before the display could flip to answer_reveal: eight teams meant sixteen serial
+  // round trips, so the projector sat on the question for a second or more after the host clicked
+  // Reveal. Worst in Sequencing, where every team submits, so every team costs two trips.
+  const lockedAt = (await dbNow(sessionId)).toISOString();
+  const gradedAnswers: Record<string, unknown>[] = [];
+  const scoreRows: Record<string, unknown>[] = [];
+
   for (const a of answerRows || []) {
     let isCorrect: boolean;
     if (question?.type === 'SEQUENCE') {
@@ -479,16 +495,28 @@ export async function gradeAndReveal(sessionId: string, itemId: string, roundId:
     // saved with — always subtract its absolute value so a round saved as either 5 or -5
     // behaves the same way, rather than a stray "-5" flipping into a +5 bonus.
     const awarded = isCorrect ? effectiveMarksCorrect : -Math.abs(round?.marks_wrong ?? 0);
-    await supabase.from('answers').update({ is_correct: isCorrect, awarded_marks: awarded, locked_at: new Date().toISOString() }).eq('id', a.id);
+    // Upsert on the primary key, so the whole batch is one request. `a` came from select('*'),
+    // so every NOT NULL column (answer_json in particular) is already on it.
+    gradedAnswers.push({ ...a, is_correct: isCorrect, awarded_marks: awarded, locked_at: lockedAt });
     if (awarded !== 0) {
       // question_set_item_id ties the score to the question that produced it, so "Reset Question"
       // can take its points back and the idempotency check above can see it.
-      await supabase.from('scores').insert({
+      scoreRows.push({
         session_id: sessionId, team_id: a.team_id, round_id: roundId, question_set_item_id: itemId, points: awarded,
         reason: isCorrect ? 'Correct answer' : 'Wrong answer', source: question?.type === 'SEQUENCE' ? 'auto_sequence' : 'auto_mcq',
       });
     }
   }
+
+  if (gradedAnswers.length > 0) {
+    const [answerWrite, scoreWrite] = await Promise.all([
+      supabase.from('answers').upsert(gradedAnswers, { onConflict: 'id' }),
+      scoreRows.length > 0 ? supabase.from('scores').insert(scoreRows) : Promise.resolve({ error: null }),
+    ]);
+    // Surface a failed grade instead of revealing an answer nobody was scored for.
+    if (answerWrite.error || scoreWrite.error) throw answerWrite.error || scoreWrite.error;
+  }
+
   await setDisplayState(sessionId, 'answer_reveal');
   await logEvent(sessionId, 'answer_revealed', { itemId });
 }
@@ -556,7 +584,7 @@ export async function resetCurrentQuestion(sessionId: string, itemId: string) {
   const { data: set } = item ? await supabase.from('question_sets').select('round_id').eq('id', item.question_set_id).maybeSingle() : { data: null };
   const { data: round } = set?.round_id ? await supabase.from('rounds').select('timer_seconds').eq('id', set.round_id).maybeSingle() : { data: null };
   await supabase.from('live_sessions').update({
-    display_state: 'question', timer_state: autoStartTimerState(round?.timer_seconds),
+    display_state: 'question', timer_state: await autoStartTimerState(sessionId, round?.timer_seconds),
   }).eq('id', sessionId);
   await logEvent(sessionId, 'question_reset', { itemId });
 }

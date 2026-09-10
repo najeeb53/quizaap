@@ -17,11 +17,20 @@ import { questionTypeForRound } from '@/lib/questionSet';
 import { arabicClass, arabicDir } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
 import { questionImages } from '@/lib/media';
+import { warmDbClock, dbNowMs } from '@/lib/serverClock';
 
 type Question = { id: string; text: string; type: string; answer: string; media_url: string | null; media_urls?: string[] | null };
 type Option = { option_key: string; option_text: string };
 type BuzzerEvent = { id: string; team_id: string; status: string; buzzed_at: string; team_name?: string };
-type ScoreLogRow = { id: string; team_id: string; points: number; reason: string | null; created_at: string; team_name?: string };
+// session_id and round_id are carried even though nothing renders them: undoScore writes the
+// reversing row from these fields, and the scoreboard only sums rows matching the session. Without
+// them the reversal was inserted with a NULL session_id — so "Undo" wrote a row that no total ever
+// counted, and the host watched the score refuse to budge while the table quietly filled with
+// orphaned entries.
+type ScoreLogRow = {
+  id: string; session_id: string; team_id: string; round_id: string | null;
+  points: number; reason: string | null; created_at: string; team_name?: string;
+};
 
 const RAPID_FIRE_MAX_WRONG = 4;
 const RAPID_FIRE_MAX_PASS = 3;
@@ -124,35 +133,54 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const fetchScores = useCallback(async (quizId: string) => {
     const [sb, { data: recent }] = await Promise.all([
       fetchScoreboard(quizId, sessionId),
-      supabase.from('scores').select('id, team_id, points, reason, created_at, teams(name)').eq('session_id', sessionId).order('created_at', { ascending: false }).limit(10),
+      supabase.from('scores').select('id, session_id, team_id, round_id, points, reason, created_at, teams(name)').eq('session_id', sessionId).order('created_at', { ascending: false }).limit(10),
     ]);
     setScoreboard(sb);
     setRecentScores((recent || []).map((r: any) => ({ ...r, team_name: r.teams?.name })));
   }, [sessionId]);
 
+  /** Pick board + this round's elimination tally. Split out of refreshAll so an elimination can
+   *  refresh just these two instead of re-reading the entire session. */
+  const fetchRoundExtras = useCallback(async (s: LiveSession | null) => {
+    if (!s?.current_round_id) { setPickItems([]); setRoundEliminationCount(0); return; }
+    // How many teams have already been eliminated FOR THIS ROUND — so the Round Complete banner
+    // can say "1 of 2 eliminated" instead of just a generic "eliminate a team" hint that's easy
+    // to miss (and easy to lose count of turn by turn, or to double-do on a later round).
+    const [items, { count }] = await Promise.all([
+      fetchPickItems(s.id, s.current_round_id),
+      supabase.from('eliminations').select('id', { count: 'exact', head: true })
+        .eq('session_id', s.id).eq('round_id', s.current_round_id).is('reversed_at', null),
+    ]);
+    setPickItems(items);
+    setRoundEliminationCount(count || 0);
+  }, []);
+
+  // Everything after the session read is independent, so it all goes out at once. Serially awaited,
+  // this was ~12 round trips deep — and it ran on EVERY realtime event, so a buzzer round with
+  // eight teams slapping their buttons queued eight overlapping twelve-deep refreshes and the
+  // host's "who buzzed first" list visibly lagged the room.
   const refreshAll = useCallback(async () => {
     const s = await fetchSession();
     if (!s) return;
-    await fetchRounds(s.quiz_id);
-    await fetchQuestion(s.current_question_set_item_id);
-    await fetchBuzzers(s.current_question_set_item_id);
-    await fetchScores(s.quiz_id);
-    if (s.current_round_id) {
-      const items = await fetchPickItems(s.id, s.current_round_id);
-      setPickItems(items);
-      // How many teams have already been eliminated FOR THIS ROUND — so the Round Complete banner
-      // can say "1 of 2 eliminated" instead of just a generic "eliminate a team" hint that's easy
-      // to miss (and easy to lose count of turn by turn, or to double-do on a later round).
-      const { count } = await supabase.from('eliminations').select('id', { count: 'exact', head: true })
-        .eq('session_id', s.id).eq('round_id', s.current_round_id).is('reversed_at', null);
-      setRoundEliminationCount(count || 0);
-    } else {
-      setPickItems([]);
-      setRoundEliminationCount(0);
-    }
-  }, [fetchSession, fetchRounds, fetchQuestion, fetchBuzzers, fetchScores]);
+    await Promise.all([
+      fetchRounds(s.quiz_id),
+      fetchQuestion(s.current_question_set_item_id),
+      fetchBuzzers(s.current_question_set_item_id),
+      fetchScores(s.quiz_id),
+      fetchRoundExtras(s),
+    ]);
+  }, [fetchSession, fetchRounds, fetchQuestion, fetchBuzzers, fetchScores, fetchRoundExtras]);
 
   useEffect(() => { refreshAll(); }, [refreshAll]);
+
+  // Latest values for the realtime handlers to read. Without these the subscription effect would
+  // have to depend on `session`, tearing the channel down and re-subscribing on every single
+  // session change — and a channel that is mid-resubscribe silently drops the buzzes that arrive
+  // during the handshake.
+  const sessionRef = useRef<LiveSession | null>(null);
+  useEffect(() => { sessionRef.current = session; }, [session]);
+  const refreshAllRef = useRef(refreshAll);
+  useEffect(() => { refreshAllRef.current = refreshAll; }, [refreshAll]);
 
   // Who got the Sequencing order right, and how fast — fetched once the question is revealed
   // (the grading pass has run by then, so is_correct/awarded_marks are populated). Re-fetches on
@@ -210,8 +238,19 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   // Reset the pick + fetch whatever answer is already locked in for them whenever the question or
   // the answering team changes.
   useEffect(() => { setAnswerTeamId(null); setIgnoreTimeoutFor(null); setPassOverrideTeamId(null); }, [session?.current_question_set_item_id]);
+  // Whoever currently holds the floor. Order matters: a buzz still 'accepted' is the team being
+  // waited on right now, and only if nobody holds the floor does an already-judged buzz stand in
+  // (to keep the panel showing who just answered during the reveal).
+  //
+  // This used to be one `.find()` across accepted/correct/wrong, which returned whichever matched
+  // FIRST IN BUZZ ORDER — so the normal buzzer flow broke: accept team A, judge A wrong, accept
+  // team B, and the screen still named A as the team answering, because A's 'wrong' row came first.
+  // Locking in an answer at that point would have recorded it against A.
   const acceptedBuzzTeamId = round?.buzzer_enabled
-    ? buzzers.find(b => b.status === 'accepted' || b.status === 'correct' || b.status === 'wrong')?.team_id || null
+    ? buzzers.find(b => b.status === 'accepted')?.team_id
+      ?? buzzers.find(b => b.status === 'correct')?.team_id
+      ?? [...buzzers].reverse().find(b => b.status === 'wrong')?.team_id
+      ?? null
     : null;
   const answeringTeamId = round?.buzzer_enabled
     ? acceptedBuzzTeamId
@@ -297,22 +336,52 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     await gradeAndReveal(sessionId, itemId, round.id);
   }
 
+  /** Just the "N teams have submitted" counter for a Sequencing question — the only thing on this
+   *  screen an `answers` insert actually changes while a question is live. */
+  const fetchSeqSubmittedCount = useCallback(async () => {
+    const itemId = sessionRef.current?.current_question_set_item_id;
+    if (!itemId) return;
+    const { count } = await supabase.from('answers').select('id', { count: 'exact', head: true })
+      .eq('session_id', sessionId).eq('question_set_item_id', itemId);
+    setSeqSubmittedCount(count || 0);
+  }, [sessionId]);
+
+  // Each table refreshes only what it actually affects, and the channel is subscribed ONCE for the
+  // life of the session (handlers read through refs). Previously every event on any of these five
+  // tables ran the full refreshAll, so a single buzz cost a dozen queries — the single biggest
+  // source of lag on the host screen during a buzzer round. A buzz now costs exactly one.
   useEffect(() => {
     const sub = supabase.channel(`host:${sessionId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'live_sessions', filter: `id=eq.${sessionId}` }, () => refreshAll())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` }, () => refreshAll())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'scores', filter: `session_id=eq.${sessionId}` }, () => refreshAll())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `session_id=eq.${sessionId}` }, () => refreshAll())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'eliminations', filter: `session_id=eq.${sessionId}` }, () => refreshAll())
+      // The session row is the one case that really can change anything — round, question, state.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'live_sessions', filter: `id=eq.${sessionId}` },
+        () => refreshAllRef.current())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` },
+        () => fetchBuzzers(sessionRef.current?.current_question_set_item_id ?? null))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'scores', filter: `session_id=eq.${sessionId}` },
+        () => { const q = sessionRef.current?.quiz_id; if (q) fetchScores(q); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `session_id=eq.${sessionId}` },
+        () => fetchSeqSubmittedCount())
+      // An elimination changes both the scoreboard's eliminated flags and the round's tally.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'eliminations', filter: `session_id=eq.${sessionId}` },
+        () => { const s = sessionRef.current; if (s?.quiz_id) fetchScores(s.quiz_id); fetchRoundExtras(s); })
       .subscribe();
     return () => { supabase.removeChannel(sub); };
-  }, [sessionId, refreshAll]);
+  }, [sessionId, fetchBuzzers, fetchScores, fetchSeqSubmittedCount, fetchRoundExtras]);
 
-  // tick for timer display
+  // One clock for the whole show: measure this browser's offset from the database clock up front,
+  // so the countdown and every "completed in Ns" figure agree with the timestamps Postgres writes.
+  useEffect(() => { warmDbClock(sessionId); }, [sessionId]);
+
+  // tick for timer display — on the database's clock, and only while a timer is actually running.
+  // It used to tick unconditionally, re-rendering this whole screen four times a second even when
+  // nothing on it was counting down.
+  const timerRunning = !!session?.timer_state?.startedAt && !session?.timer_state?.paused;
   useEffect(() => {
-    const t = setInterval(() => setTimerNow(Date.now()), 250);
+    if (!timerRunning) return;
+    setTimerNow(dbNowMs()); // don't wait 250ms to show the first value
+    const t = setInterval(() => setTimerNow(dbNowMs()), 250);
     return () => clearInterval(t);
-  }, []);
+  }, [timerRunning]);
 
   function timerRemaining(atMs: number = timerNow): number | null {
     const ts = session?.timer_state;
@@ -381,7 +450,10 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   /** True only while this turn can still be scored. Re-reads the clock live rather than trusting
    * the 250ms render tick, so a click landing just after time expires can't still score. */
   function rapidFireOpen() {
-    return !rapidLocked && (timerRemaining(Date.now()) ?? 0) > 0 && !!session?.current_picker_team_id;
+    // dbNowMs, not Date.now: startedAt is on the database's clock, so comparing it to this
+    // browser's raw clock would let a skewed host PC score after time expired (or block scoring
+    // while time remained).
+    return !rapidLocked && (timerRemaining(dbNowMs()) ?? 0) > 0 && !!session?.current_picker_team_id;
   }
 
   async function handleRapidFireCorrect() {
@@ -422,7 +494,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     // No alert needed any more — nextQuestion now sets display_state to 'round_complete' when
     // there's nothing left, and that renders its own persistent banner below (survives a refresh,
     // unlike a one-time popup).
-    await guard('next-question', () => nextQuestion(sessionId, round.id, session.current_question_set_item_id), 'Failed to move to the next question.');
+    await guard('next-question', async () => { await nextQuestion(sessionId, round.id, session.current_question_set_item_id); }, 'Failed to move to the next question.');
   }
 
   async function handleAward(teamId: string, points: number, reason: string) {
