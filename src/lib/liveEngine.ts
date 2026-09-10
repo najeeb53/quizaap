@@ -369,6 +369,27 @@ export async function submitSequenceAnswer(sessionId: string, itemId: string, te
   }, { onConflict: 'session_id,question_set_item_id,team_id' });
 }
 
+export type SequenceResult = {
+  team_id: string; team_name: string; order: string[];
+  is_correct: boolean | null; awarded_marks: number | null; submitted_at: string;
+};
+
+/** Every team's submitted order for a Sequencing question, oldest submission first — the same
+ * `submitted_at` server clock the Host/Team/Display screens already use for the buzzer, so a
+ * completion time computed from it lines up across every screen. Called once the question is
+ * revealed, so the Host and Display screens can show who nailed the order and how fast. */
+export async function fetchSequenceResults(sessionId: string, itemId: string): Promise<SequenceResult[]> {
+  const { data } = await supabase.from('answers')
+    .select('team_id, answer_json, is_correct, awarded_marks, submitted_at, teams(name)')
+    .eq('session_id', sessionId).eq('question_set_item_id', itemId)
+    .order('submitted_at');
+  return (data || []).map((a: any) => ({
+    team_id: a.team_id, team_name: a.teams?.name || 'Unknown team',
+    order: a.answer_json?.order || [], is_correct: a.is_correct, awarded_marks: a.awarded_marks,
+    submitted_at: a.submitted_at,
+  }));
+}
+
 /** Grades all submitted answers for the current question — MCQ against the (host-only) correct
  * answer key, Sequencing against the options' correct sort_order — writes awarded_marks back
  * onto each answers row, records score transactions, and moves the session into answer_reveal. */

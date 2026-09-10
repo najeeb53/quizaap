@@ -378,8 +378,10 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
     <div className={`flex flex-col items-center justify-center min-h-[60vh] gap-6 w-full max-w-lg mx-auto px-4 py-6 ${arabicClass(team.name)}`}>
       <h2 className={`text-2xl font-bold text-gray-900 tracking-tight ${arabicClass(team.name)}`}>{team.name}</h2>
 
-      {/* The countdown, so teams can see how long they've got instead of guessing. */}
-      {remaining !== null && (state === 'question' || state === 'buzzer_open') && (
+      {/* The countdown, so teams can see how long they've got instead of guessing. Buzzer rounds
+          have no time limit to answer once buzzed — it's a race to buzz, not a countdown — so the
+          clock is skipped there entirely. */}
+      {remaining !== null && !isBuzzerRound && (state === 'question' || state === 'buzzer_open') && (
         <div className={`text-4xl font-mono font-extrabold border-2 rounded-2xl px-6 py-2 shadow-sm transition-colors ${timerColor}`}>
           {timeUp ? "Time's up" : `${remaining}s`}
         </div>

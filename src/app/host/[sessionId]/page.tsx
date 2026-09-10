@@ -9,7 +9,7 @@ import {
   gradeAndReveal, setDisplayState, awardManualScore, undoScore,
   eliminateTeam, resetSession, resetCurrentQuestion, resetRound, resetScores,
   fetchPickItems, computeCurrentTierAsync, type TierResult, setCurrentPicker, openCategoryPicks, pickCategory,
-  submitAnswer, startRapidFireTurn,
+  submitAnswer, startRapidFireTurn, fetchSequenceResults, type SequenceResult,
 } from '@/lib/liveEngine';
 import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
 import { questionTypeForRound } from '@/lib/questionSet';
@@ -32,7 +32,9 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const [question, setQuestion] = useState<Question | null>(null);
   const [options, setOptions] = useState<Option[]>([]);
   const [correctSequence, setCorrectSequence] = useState<string[]>([]);
+  const [seqOptionsByKey, setSeqOptionsByKey] = useState<Record<string, string>>({});
   const [seqSubmittedCount, setSeqSubmittedCount] = useState(0);
+  const [seqResults, setSeqResults] = useState<SequenceResult[]>([]);
   const [buzzers, setBuzzers] = useState<BuzzerEvent[]>([]);
   const [scoreboard, setScoreboard] = useState<ScoreRow[]>([]);
   const [recentScores, setRecentScores] = useState<ScoreLogRow[]>([]);
@@ -66,30 +68,38 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   }, []);
 
   const fetchQuestion = useCallback(async (itemId: string | null) => {
-    if (!itemId) { setQuestion(null); setOptions([]); setPickedTeamId(null); setCorrectSequence([]); setSeqSubmittedCount(0); return; }
+    if (!itemId) { setQuestion(null); setOptions([]); setPickedTeamId(null); setCorrectSequence([]); setSeqOptionsByKey({}); setSeqSubmittedCount(0); setSeqResults([]); return; }
     const { data: item } = await supabase.from('question_set_items').select('question_id, option_order, picked_by_team_id').eq('id', itemId).single();
     // Clear rather than bail, so an unreadable item can't leave the previous question on screen
     // while the session has already moved on.
-    if (!item) { setQuestion(null); setOptions([]); setPickedTeamId(null); setCorrectSequence([]); setSeqSubmittedCount(0); return; }
+    if (!item) { setQuestion(null); setOptions([]); setPickedTeamId(null); setCorrectSequence([]); setSeqOptionsByKey({}); setSeqSubmittedCount(0); setSeqResults([]); return; }
     setPickedTeamId(item.picked_by_team_id || null);
     const { data: q } = await supabase.from('questions').select('id, text, type, answer, media_url, media_urls').eq('id', item.question_id).single();
     setQuestion(q || null);
+    // seqResults is intentionally NOT reset here: fetchQuestion re-runs on every realtime tick
+    // (any answers/session change calls refreshAll), including while a Sequencing reveal is on
+    // screen, and resetting it here raced the dedicated reveal-fetch effect below — it would blank
+    // the results and nothing would repopulate them until the item or display_state actually
+    // changed. The reveal effect owns clearing/populating seqResults for the item it applies to.
     if (q?.type === 'MCQ') {
       const { data: opts } = await supabase.from('question_options').select('option_key, option_text').eq('question_id', q.id);
       const order: string[] = item.option_order || [];
       const sorted = [...(opts || [])].sort((a, b) => order.indexOf(a.option_key) - order.indexOf(b.option_key));
       setOptions(sorted);
       setCorrectSequence([]);
+      setSeqOptionsByKey({});
       setSeqSubmittedCount(0);
     } else if (q?.type === 'SEQUENCE') {
       setOptions([]);
-      const { data: opts } = await supabase.from('question_options').select('option_text, sort_order').eq('question_id', q.id).order('sort_order');
+      const { data: opts } = await supabase.from('question_options').select('option_key, option_text, sort_order').eq('question_id', q.id).order('sort_order');
       setCorrectSequence((opts || []).map((o: any) => o.option_text));
+      setSeqOptionsByKey(Object.fromEntries((opts || []).map((o: any) => [o.option_key, o.option_text])));
       const { count } = await supabase.from('answers').select('id', { count: 'exact', head: true }).eq('session_id', sessionId).eq('question_set_item_id', itemId);
       setSeqSubmittedCount(count || 0);
     } else {
       setOptions([]);
       setCorrectSequence([]);
+      setSeqOptionsByKey({});
       setSeqSubmittedCount(0);
     }
   }, [sessionId]);
@@ -130,6 +140,20 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   }, [fetchSession, fetchRounds, fetchQuestion, fetchBuzzers, fetchScores]);
 
   useEffect(() => { refreshAll(); }, [refreshAll]);
+
+  // Who got the Sequencing order right, and how fast — fetched once the question is revealed
+  // (the grading pass has run by then, so is_correct/awarded_marks are populated). Re-fetches on
+  // any answers change while revealed so a late "Reset Question"/re-grade stays in sync.
+  useEffect(() => {
+    const itemId = session?.current_question_set_item_id;
+    if (question?.type !== 'SEQUENCE' || session?.display_state !== 'answer_reveal' || !itemId) {
+      setSeqResults([]);
+      return;
+    }
+    let cancelled = false;
+    fetchSequenceResults(sessionId, itemId).then(r => { if (!cancelled) setSeqResults(r); });
+    return () => { cancelled = true; };
+  }, [sessionId, question?.type, session?.display_state, session?.current_question_set_item_id]);
 
   // Only pick rounds have a category board. This used to run on every realtime event of every
   // round type — including a query per Rapid Fire tap — and two in-flight computations could
@@ -502,6 +526,45 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 </div>
               )}
 
+              {/* Every team's submitted order once revealed, fastest correct team first. Completion
+                  time is measured from when the host started the timer for this question (the same
+                  server clock the buzzer uses), so it lines up with what the Display screen shows. */}
+              {question.type === 'SEQUENCE' && session.display_state === 'answer_reveal' && seqResults.length > 0 && (
+                <div className="mt-3 mb-1">
+                  <h4 className="text-sm font-bold text-gray-300 mb-2">Team Results — fastest correct first</h4>
+                  <ul className="flex flex-col gap-1.5">
+                    {[...seqResults]
+                      .sort((a, b) => {
+                        if (!!a.is_correct !== !!b.is_correct) return a.is_correct ? -1 : 1;
+                        return new Date(a.submitted_at).getTime() - new Date(b.submitted_at).getTime();
+                      })
+                      .map((r, i) => {
+                        const startedAt = (session.timer_state as { startedAt?: string } | null)?.startedAt;
+                        const elapsed = startedAt
+                          ? Math.max(0, (new Date(r.submitted_at).getTime() - new Date(startedAt).getTime()) / 1000)
+                          : null;
+                        const orderText = r.order.map(k => seqOptionsByKey[k] || k).join(' → ');
+                        return (
+                          <li key={r.team_id} className="flex items-center justify-between gap-3 bg-gray-700/60 border border-gray-600 rounded-lg px-3 py-1.5 text-sm">
+                            <span className="min-w-0">
+                              <span className={arabicClass(r.team_name)}>
+                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-gray-900 text-xs font-bold text-gray-300 mr-1.5 align-middle">{i + 1}</span>
+                                <span className="text-gray-100">{r.team_name}</span>
+                                {' — '}
+                                <span className={r.is_correct ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
+                                  {r.is_correct ? '✓ Correct' : '✗ Wrong'}
+                                </span>
+                              </span>
+                              <p className={`text-xs text-gray-400 mt-0.5 truncate ${arabicClass(orderText)}`}>{orderText}</p>
+                            </span>
+                            <span className="text-gray-300 font-mono text-xs shrink-0">{elapsed !== null ? `${elapsed.toFixed(1)}s` : '—'}</span>
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              )}
+
               {!round?.team_picks_category && options.length > 0 && session.display_state !== 'answer_reveal' && (
                 <div className="flex items-center gap-2 mt-2 mb-1">
                   <span className="text-sm text-gray-400">Team answering:</span>
@@ -614,7 +677,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 Back to Category Picks
               </button>
             )}
-            {round?.round_type !== 'RAPID_FIRE' && round?.timer_seconds ? (
+            {round?.round_type !== 'RAPID_FIRE' && round?.round_type !== 'BUZZER' && round?.round_type !== 'PICTURE_BUZZER' && round?.timer_seconds ? (
               <>
                 <button onClick={() => startTimer(sessionId, round.timer_seconds)} className="bg-[#10b981] hover:brightness-110 transition-all px-3 py-1.5 rounded-lg text-sm font-semibold text-white shadow-md">Start Timer</button>
                 {/* Disabled with no timer running: pausing "nothing" used to write remaining: 0,

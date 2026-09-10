@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef, use } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
-import { fetchPickItems, computeCurrentTierAsync, type PickItem, type TierResult } from '@/lib/liveEngine';
+import { fetchPickItems, computeCurrentTierAsync, fetchSequenceResults, type PickItem, type TierResult, type SequenceResult } from '@/lib/liveEngine';
 import { questionTypeForRound } from '@/lib/questionSet';
 import { arabicClass, arabicDir } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
@@ -24,6 +24,7 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
   const [options, setOptions] = useState<Option[]>([]);
   const [sequenceItems, setSequenceItems] = useState<Option[]>([]);
   const [correctSequence, setCorrectSequence] = useState<string[]>([]);
+  const [seqResults, setSeqResults] = useState<SequenceResult[]>([]);
   const [revealedAnswer, setRevealedAnswer] = useState<string | null>(null);
   const [buzzFirst, setBuzzFirst] = useState<string | null>(null);
   const [buzzOrder, setBuzzOrder] = useState<{ team_id: string; status: string; team_name?: string }[]>([]);
@@ -97,6 +98,20 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
     }
     load();
   }, [sessionData?.current_round_id, sessionData?.current_question_set_item_id]);
+
+  // Who got the Sequencing order right, and how fast — fetched once the question is revealed.
+  // Not reset by the question-load effect above (which re-runs on every item/round change) so it
+  // isn't blanked by unrelated realtime traffic; it's owned entirely by this effect's own deps.
+  useEffect(() => {
+    const itemId = sessionData?.current_question_set_item_id;
+    if (question?.type !== 'SEQUENCE' || sessionData?.display_state !== 'answer_reveal' || !itemId) {
+      setSeqResults([]);
+      return;
+    }
+    let cancelled = false;
+    fetchSequenceResults(sessionId, itemId).then(r => { if (!cancelled) setSeqResults(r); });
+    return () => { cancelled = true; };
+  }, [sessionId, question?.type, sessionData?.display_state, sessionData?.current_question_set_item_id]);
 
   // Live-updating while the scoreboard is up: it used to be a one-shot snapshot taken when the
   // host switched to it, so any correction made while it was on the projector stayed invisible.
@@ -250,7 +265,34 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
               </ol>
             </div>
           )}
-          {remaining !== null && (state === 'question' || state === 'buzzer_open') && (
+          {showAnswer && seqResults.length > 0 && (
+            <div className="mt-8">
+              <p className="text-2xl text-gray-400 mb-3">Team results — fastest correct first:</p>
+              <ol className="flex flex-col gap-3 max-w-2xl mx-auto text-left">
+                {[...seqResults]
+                  .sort((a, b) => {
+                    if (!!a.is_correct !== !!b.is_correct) return a.is_correct ? -1 : 1;
+                    return new Date(a.submitted_at).getTime() - new Date(b.submitted_at).getTime();
+                  })
+                  .map((r, i) => {
+                    const startedAt = (sessionData?.timer_state as { startedAt?: string } | null)?.startedAt;
+                    const elapsed = startedAt
+                      ? Math.max(0, (new Date(r.submitted_at).getTime() - new Date(startedAt).getTime()) / 1000)
+                      : null;
+                    return (
+                      <li key={r.team_id} className={`flex items-center justify-between gap-4 p-4 rounded-xl border-2 shadow-lg ${r.is_correct ? 'bg-gradient-to-br from-green-700/70 to-green-900/70 border-green-400 shadow-green-900/50' : 'bg-gradient-to-br from-red-900/50 to-red-950/50 border-red-500/60 shadow-red-900/40'}`}>
+                        <span className={`text-xl font-semibold ${arabicClass(r.team_name)}`}>
+                          <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-black/40 text-sm font-bold mr-2 align-middle">{i + 1}</span>
+                          {r.team_name} {r.is_correct ? '✓' : '✗'}
+                        </span>
+                        <span className="text-xl font-mono">{elapsed !== null ? `${elapsed.toFixed(1)}s` : '—'}</span>
+                      </li>
+                    );
+                  })}
+              </ol>
+            </div>
+          )}
+          {remaining !== null && round?.round_type !== 'BUZZER' && round?.round_type !== 'PICTURE_BUZZER' && (state === 'question' || state === 'buzzer_open') && (
             <div className="mt-10 flex justify-center">
               <div className={`inline-flex items-center justify-center rounded-full w-40 h-40 text-6xl font-mono font-bold border-4 shadow-xl ${remaining <= 5 ? 'border-red-400 text-red-300 bg-red-950/60 shadow-red-900/50 animate-pulse' : remaining <= 10 ? 'border-amber-400 text-amber-300 bg-amber-950/50 shadow-amber-900/40' : 'border-green-400 text-green-300 bg-green-950/40 shadow-green-900/30'}`}>
                 {remaining}s
