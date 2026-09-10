@@ -10,6 +10,7 @@ import {
   eliminateTeam, resetSession, resetCurrentQuestion, resetRound, resetScores,
   fetchPickItems, computeCurrentTierAsync, type TierResult, setCurrentPicker, openCategoryPicks, pickCategory,
   submitAnswer, startRapidFireTurn, fetchSequenceResults, type SequenceResult,
+  passQuestion, fetchPassedTeams, type PassedTeam, PASS_MARKS_CORRECT, declareWinner,
 } from '@/lib/liveEngine';
 import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
 import { questionTypeForRound } from '@/lib/questionSet';
@@ -37,6 +38,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const [seqResults, setSeqResults] = useState<SequenceResult[]>([]);
   const [buzzers, setBuzzers] = useState<BuzzerEvent[]>([]);
   const [scoreboard, setScoreboard] = useState<ScoreRow[]>([]);
+  const [winnerPick, setWinnerPick] = useState<string | null>(null);
   const [recentScores, setRecentScores] = useState<ScoreLogRow[]>([]);
   const [timerNow, setTimerNow] = useState(Date.now());
   const [manualPoints, setManualPoints] = useState(10);
@@ -45,6 +47,8 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const [tier, setTier] = useState<TierResult>({ difficulty: null, categories: [], nextItemId: null, done: true });
   const [pickedTeamId, setPickedTeamId] = useState<string | null>(null); // who picked this item's category, if a pick round
   const [answerTeamId, setAnswerTeamId] = useState<string | null>(null); // host-chosen answering team, for non-pick rounds
+  const [passOverrideTeamId, setPassOverrideTeamId] = useState<string | null>(null); // who a pass just handed the question to
+  const [passedTeams, setPassedTeams] = useState<PassedTeam[]>([]); // every team that's passed on the current question
   const [lockedKey, setLockedKey] = useState<string | null>(null);
   const [locking, setLocking] = useState(false);
   const [ignoreTimeoutFor, setIgnoreTimeoutFor] = useState<string | null>(null); // itemId the host said "let them answer anyway" on
@@ -189,11 +193,58 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     return () => { cancelled = true; };
   }, [sessionId, round?.id, round?.round_type, session?.current_picker_team_id, recentScores]);
 
-  // Whoever is answering the current question: the team that picked its category (pick
-  // rounds), or whoever the host selects (non-pick rounds). Reset the pick + fetch whatever
-  // answer is already locked in for them whenever the question or the answering team changes.
-  useEffect(() => { setAnswerTeamId(null); setIgnoreTimeoutFor(null); }, [session?.current_question_set_item_id]);
-  const answeringTeamId = round?.team_picks_category ? pickedTeamId : answerTeamId;
+  // Whoever is answering the current question: the team that picked its category (pick rounds),
+  // the team whose buzz the host accepted (MCQ + Buzzer rounds — no need to also hand-pick them
+  // from a dropdown, the buzzer already decided), whoever a Pass just handed the question to
+  // (takes priority over both — it overrides who picked/was assigned this question), or whoever
+  // the host selects (plain rounds).
+  // Reset the pick + fetch whatever answer is already locked in for them whenever the question or
+  // the answering team changes.
+  useEffect(() => { setAnswerTeamId(null); setIgnoreTimeoutFor(null); setPassOverrideTeamId(null); }, [session?.current_question_set_item_id]);
+  const acceptedBuzzTeamId = round?.buzzer_enabled
+    ? buzzers.find(b => b.status === 'accepted' || b.status === 'correct' || b.status === 'wrong')?.team_id || null
+    : null;
+  const answeringTeamId = round?.buzzer_enabled
+    ? acceptedBuzzTeamId
+    : passOverrideTeamId || (round?.team_picks_category ? pickedTeamId : answerTeamId);
+
+  // Passing is MCQ-only (host-controlled): Sequencing has every team answer simultaneously so
+  // there's no "next team" to hand it to, and Buzzer/Rapid Fire have their own turn mechanics.
+  const passingAllowed = question?.type === 'MCQ' && !round?.buzzer_enabled && round?.round_type !== 'RAPID_FIRE';
+
+  // Re-fetch who's already passed on this item whenever it changes (covers a host refresh
+  // mid-question, not just passes made in this browser tab).
+  useEffect(() => {
+    const itemId = session?.current_question_set_item_id;
+    if (!passingAllowed || !itemId) { setPassedTeams([]); return; }
+    let cancelled = false;
+    fetchPassedTeams(sessionId, itemId).then(rows => { if (!cancelled) setPassedTeams(rows); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, session?.current_question_set_item_id, passingAllowed]);
+
+  async function handlePass() {
+    const itemId = session?.current_question_set_item_id;
+    if (!itemId || !answeringTeamId || !passingAllowed) return;
+    const passingTeamId = answeringTeamId;
+    await guard('pass', async () => {
+      const { error } = await passQuestion(sessionId, itemId, passingTeamId);
+      if (error) throw error;
+      const updatedPassed = [...passedTeams, { team_id: passingTeamId, team_name: activeTeams.find(t => t.team_id === passingTeamId)?.name || 'Unknown team' }];
+      setPassedTeams(updatedPassed);
+      const passedIds = new Set(updatedPassed.map(p => p.team_id));
+      // Same alphabetical order used for the category-pick "Next Team" rotation, so who's "next"
+      // is predictable rather than arbitrary.
+      const next = [...activeTeams].sort((a, b) => a.name.localeCompare(b.name)).find(t => !passedIds.has(t.team_id));
+      if (next) {
+        setPassOverrideTeamId(next.team_id);
+        setAnswerTeamId(next.team_id);
+      } else {
+        setPassOverrideTeamId(null);
+        alert('Every active team has passed on this question — reveal it, or reset the question to try again.');
+      }
+    }, 'Failed to record the pass.');
+  }
 
   useEffect(() => {
     const itemId = session?.current_question_set_item_id;
@@ -358,15 +409,22 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
 
   async function handleShowFirstOrNext() {
     if (!session || !round) return;
-    await guard('next-question', async () => {
-      const res = await nextQuestion(sessionId, round.id, session.current_question_set_item_id);
-      // Otherwise "nothing happened" looks identical to a failed click.
-      if (res?.done) alert(`No more questions in "${round.name}".`);
-    }, 'Failed to move to the next question.');
+    // No alert needed any more — nextQuestion now sets display_state to 'round_complete' when
+    // there's nothing left, and that renders its own persistent banner below (survives a refresh,
+    // unlike a one-time popup).
+    await guard('next-question', () => nextQuestion(sessionId, round.id, session.current_question_set_item_id), 'Failed to move to the next question.');
   }
 
   async function handleAward(teamId: string, points: number, reason: string) {
     await guard(`award:${teamId}`, () => awardManualScore(sessionId, teamId, session?.current_round_id || null, points, reason), 'The score was NOT recorded.');
+  }
+
+  async function handleDeclareWinner() {
+    const teamId = winnerPick || scoreboard.find(t => t.rank === 1 && !t.eliminated)?.team_id;
+    if (!teamId) return;
+    const teamName = scoreboard.find(t => t.team_id === teamId)?.name || 'this team';
+    if (!confirm(`Declare "${teamName}" the winner? This switches the projector straight to the Winners screen.`)) return;
+    await guard('declare-winner', () => declareWinner(sessionId, teamId), 'Failed to declare the winner.');
   }
 
   async function handleEliminate(teamId: string) {
@@ -504,6 +562,14 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 </p>
               )}
             </div>
+          ) : session.display_state === 'round_complete' ? (
+            <div className="mb-4 bg-emerald-950/40 border-2 border-emerald-600/60 rounded-2xl p-6 text-center">
+              <p className="text-2xl font-bold text-emerald-300 mb-1">✓ Round Complete</p>
+              <p className="text-sm text-gray-300">Every question in &quot;{round?.name}&quot; has been shown and revealed.</p>
+              {round?.elimination_enabled && (
+                <p className="text-xs text-amber-300 mt-3">Eliminate a team in the scoreboard below if this round calls for it, then start the next round from the list on the left.</p>
+              )}
+            </div>
           ) : question ? (
             <div className="mb-4">
               <p className={`text-lg font-semibold text-white ${arabicClass(question.text)}`}>{question.text}</p>
@@ -565,7 +631,25 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 </div>
               )}
 
-              {!round?.team_picks_category && options.length > 0 && session.display_state !== 'answer_reveal' && (
+              {/* Priority: a Pass override beats everything (it means this question changed hands),
+                  then Buzzer's accepted team, then a category pick, then the host's own dropdown. */}
+              {passOverrideTeamId && session.display_state !== 'answer_reveal' ? (
+                <p className="text-xs text-gray-400 mt-2 mb-1">
+                  Answering: <b className="text-gray-200">{activeTeams.find(t => t.team_id === passOverrideTeamId)?.name || '—'}</b> (passed to them — correct answer now worth a fixed +{PASS_MARKS_CORRECT})
+                </p>
+              ) : round?.buzzer_enabled && !round?.team_picks_category && session.display_state !== 'answer_reveal' ? (
+                /* MCQ + Buzzer: the answering team comes straight from whichever buzz was accepted
+                   down in Buzzer Activity — no separate dropdown, the buzzer already decided who
+                   gets to answer. */
+                <p className="text-xs text-gray-400 mt-2 mb-1">
+                  Answering: <b className="text-gray-200">{activeTeams.find(t => t.team_id === acceptedBuzzTeamId)?.name || '— waiting for a buzz to be accepted'}</b>
+                  {acceptedBuzzTeamId ? ' (buzzed in)' : ''}
+                </p>
+              ) : round?.team_picks_category && session.display_state !== 'answer_reveal' ? (
+                <p className="text-xs text-gray-400 mt-2 mb-1">
+                  Answering: <b className="text-gray-200">{activeTeams.find(t => t.team_id === pickedTeamId)?.name || '—'}</b> (picked this category)
+                </p>
+              ) : !round?.team_picks_category && !round?.buzzer_enabled && options.length > 0 && session.display_state !== 'answer_reveal' ? (
                 <div className="flex items-center gap-2 mt-2 mb-1">
                   <span className="text-sm text-gray-400">Team answering:</span>
                   <select value={answerTeamId || ''} onChange={e => setAnswerTeamId(e.target.value || null)}
@@ -574,11 +658,20 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                     {activeTeams.map(t => <option key={t.team_id} value={t.team_id}>{t.name}</option>)}
                   </select>
                 </div>
-              )}
-              {round?.team_picks_category && session.display_state !== 'answer_reveal' && (
-                <p className="text-xs text-gray-400 mt-2 mb-1">
-                  Answering: <b className="text-gray-200">{activeTeams.find(t => t.team_id === pickedTeamId)?.name || '—'}</b> (picked this category)
-                </p>
+              ) : null}
+
+              {passingAllowed && session.display_state === 'question' && answeringTeamId && (
+                <div className="flex items-center gap-2 mt-1 mb-1">
+                  <button onClick={handlePass} disabled={isBusy('pass')}
+                    className="bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all px-3 py-1.5 rounded-lg text-sm font-medium text-white">
+                    ⤼ Pass (no penalty)
+                  </button>
+                  {passedTeams.length > 0 && (
+                    <span className="text-xs text-gray-500">
+                      Already passed: {passedTeams.map(p => p.team_name).join(', ')}
+                    </span>
+                  )}
+                </div>
               )}
 
               {session.display_state === 'question' && remaining === 0 && lockedKey === null && answeringTeamId && ignoreTimeoutFor !== session.current_question_set_item_id && (
@@ -621,7 +714,11 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 </ul>
               )}
               {options.length > 0 && session.display_state !== 'answer_reveal' && !answeringTeamId && (
-                <p className="text-xs text-amber-400 mt-2">Choose the answering team above before locking an answer.</p>
+                <p className="text-xs text-amber-400 mt-2">
+                  {round?.buzzer_enabled
+                    ? 'Accept a buzz down in Buzzer Activity before locking an answer.'
+                    : 'Choose the answering team above before locking an answer.'}
+                </p>
               )}
               {question.type === 'MCQ' && session.display_state !== 'answer_reveal' && (
                 <p className="text-xs text-gray-500 mt-2">Correct answer (host only): {question.answer}</p>
@@ -812,6 +909,29 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
               </li>
             ))}
           </ol>
+
+          {/* Usually the very last thing the host does — after every round, including Rapid Fire,
+              is finished. Defaults to whoever's currently in first place, but the host can pick a
+              different team (ties, judgement calls, etc.) before confirming. */}
+          <div className="mt-4 pt-4 border-t border-gray-700">
+            {session.winner_team_id ? (
+              <p className="text-sm text-emerald-400 font-semibold">
+                🏆 Winner declared: {scoreboard.find(t => t.team_id === session.winner_team_id)?.name || '—'}
+              </p>
+            ) : (
+              <div className="flex items-center gap-2">
+                <select value={winnerPick ?? scoreboard.find(t => t.rank === 1 && !t.eliminated)?.team_id ?? ''}
+                  onChange={e => setWinnerPick(e.target.value || null)}
+                  className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200">
+                  {scoreboard.filter(t => !t.eliminated).map(t => <option key={t.team_id} value={t.team_id}>{t.name} — {t.total} pts</option>)}
+                </select>
+                <button onClick={handleDeclareWinner} disabled={isBusy('declare-winner') || scoreboard.length === 0}
+                  className="bg-gradient-to-r from-amber-500 to-yellow-600 hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition-all px-4 py-2 rounded-lg text-sm font-bold text-white shadow-md shrink-0">
+                  🏆 Declare Winner
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

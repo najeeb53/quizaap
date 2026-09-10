@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef, use } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
-import { fetchPickItems, computeCurrentTierAsync, fetchSequenceResults, type PickItem, type TierResult, type SequenceResult } from '@/lib/liveEngine';
+import { fetchPickItems, computeCurrentTierAsync, fetchSequenceResults, fetchWinner, type PickItem, type TierResult, type SequenceResult, type WinnerInfo } from '@/lib/liveEngine';
 import { questionTypeForRound } from '@/lib/questionSet';
 import { arabicClass, arabicDir } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
@@ -25,6 +25,7 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
   const [sequenceItems, setSequenceItems] = useState<Option[]>([]);
   const [correctSequence, setCorrectSequence] = useState<string[]>([]);
   const [seqResults, setSeqResults] = useState<SequenceResult[]>([]);
+  const [winner, setWinner] = useState<WinnerInfo | null>(null);
   const [revealedAnswer, setRevealedAnswer] = useState<string | null>(null);
   const [buzzFirst, setBuzzFirst] = useState<string | null>(null);
   const [buzzOrder, setBuzzOrder] = useState<{ team_id: string; status: string; team_name?: string }[]>([]);
@@ -112,6 +113,11 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
     fetchSequenceResults(sessionId, itemId).then(r => { if (!cancelled) setSeqResults(r); });
     return () => { cancelled = true; };
   }, [sessionId, question?.type, sessionData?.display_state, sessionData?.current_question_set_item_id]);
+
+  useEffect(() => {
+    if (sessionData?.display_state !== 'winners' || !sessionData?.winner_team_id) { setWinner(null); return; }
+    fetchWinner(sessionData.winner_team_id).then(setWinner);
+  }, [sessionData?.display_state, sessionData?.winner_team_id]);
 
   // Live-updating while the scoreboard is up: it used to be a one-shot snapshot taken when the
   // host switched to it, so any correction made while it was on the projector stayed invisible.
@@ -201,6 +207,37 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
           <p className="text-3xl text-gray-400 mb-4 tracking-wide uppercase">Round {round.sequence_no}</p>
           <h1 className={`text-7xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent ${arabicClass(round.name)}`}>{round.name}</h1>
         </div>
+      )}
+
+      {state === 'round_complete' && (
+        <div className="rounded-3xl border-2 border-emerald-500/60 bg-gradient-to-br from-emerald-950/60 to-gray-950 shadow-2xl px-16 py-14">
+          <p className="text-4xl font-bold text-emerald-300 mb-3">✓ Round Complete</p>
+          {round && <p className={`text-2xl text-gray-300 ${arabicClass(round.name)}`}>{round.name}</p>}
+        </div>
+      )}
+
+      {state === 'winners' && (
+        winner ? (
+          <div className="relative rounded-3xl border-4 border-amber-400/70 bg-gradient-to-br from-amber-950/40 via-gray-950 to-amber-950/40 shadow-2xl shadow-amber-900/50 px-16 py-16 overflow-hidden">
+            <p className="text-2xl tracking-[0.3em] text-amber-300/80 uppercase mb-2">Winner</p>
+            <h1 className="text-7xl font-black bg-gradient-to-r from-amber-300 via-yellow-200 to-amber-300 bg-clip-text text-transparent mb-2">🏆</h1>
+            <h2 className={`text-6xl font-bold text-white mb-10 ${arabicClass(winner.team_name)}`}>{winner.team_name}</h2>
+            {winner.members.length > 0 ? (
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-8 max-w-4xl mx-auto">
+                {winner.members.map((m, i) => (
+                  <div key={i} className="flex flex-col items-center gap-3">
+                    <img src={m.photo_url} alt={m.name} className="w-32 h-32 rounded-full object-cover border-4 border-amber-400 shadow-lg shadow-amber-900/50" />
+                    <p className={`text-xl font-semibold text-amber-100 ${arabicClass(m.name)}`}>{m.name}</p>
+                  </div>
+                ))}
+              </div>
+            ) : winner.logo_url ? (
+              <img src={winner.logo_url} alt={winner.team_name} className="w-40 h-40 rounded-full object-cover border-4 border-amber-400 shadow-lg shadow-amber-900/50 mx-auto" />
+            ) : null}
+          </div>
+        ) : (
+          <p className="text-3xl text-gray-400">Loading winner…</p>
+        )
       )}
 
       {state === 'category_pick' && round?.team_picks_category && (
@@ -350,7 +387,7 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
           identical to a crash from the back of the room. */}
       {state === 'question' && !question && <p className="text-4xl text-gray-500">Loading question…</p>}
       {state === 'round_intro' && !round && <p className="text-4xl text-gray-500">Loading round…</p>}
-      {!['idle', 'round_intro', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'blank'].includes(state) && (
+      {!['idle', 'round_intro', 'round_complete', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'winners', 'blank'].includes(state) && (
         <p className="text-4xl text-gray-500">Standby…</p>
       )}
     </div>

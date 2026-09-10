@@ -204,10 +204,6 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
     return () => { supabase.removeChannel(sub); };
   }, [sessionId, teamCode, refreshBuzzOrder]);
 
-  // The "holder of the floor" skips rejected buzzes (a false start doesn't block the next team).
-  const activeBuzz = buzzOrder.find(b => b.status !== 'rejected') || null;
-  const lockedOutByOtherTeam = !!(activeBuzz && team && activeBuzz.team_id !== team.id);
-
   // myBuzz is DERIVED from the live buzz list rather than held as its own state. Held separately,
   // it was only ever cleared when the question changed — so after the host hit "Reset Buzzer"
   // (which deletes the rows), this team's screen stayed stuck on "Buzzed! Waiting for host…"
@@ -300,7 +296,11 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   }
 
   async function handleBuzz() {
-    if (!team || !sessionId || !sessionData?.current_question_set_item_id || myBuzz || lockedOutByOtherTeam || buzzPending) return;
+    // Every active team can buzz in independently — one team buzzing first no longer locks the
+    // others out. Each team's own button disables only once THEY have buzzed (myBuzz); the host
+    // sees everyone's buzz in arrival order (see Buzzer Activity on the host screen) and judges
+    // them one at a time.
+    if (!team || !sessionId || !sessionData?.current_question_set_item_id || myBuzz || buzzPending) return;
     setBuzzPending(true);
     playBuzzSound();
     const { error } = await submitBuzz(sessionId, sessionData.current_question_set_item_id, team.id);
@@ -395,6 +395,16 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
       {state === 'round_intro' && (
         <span className="rounded-full px-4 py-2 text-sm font-semibold bg-blue-50 text-blue-700 border border-blue-100">
           Get ready — next round is starting!
+        </span>
+      )}
+      {state === 'round_complete' && (
+        <span className="rounded-full px-4 py-2 text-sm font-semibold bg-emerald-50 text-emerald-700 border border-emerald-100">
+          ✓ Round complete — waiting for the host to start the next round…
+        </span>
+      )}
+      {state === 'winners' && (
+        <span className="rounded-full px-4 py-2 text-sm font-semibold bg-amber-50 text-amber-700 border border-amber-100">
+          🏆 The winner has been announced — check the projector!
         </span>
       )}
 
@@ -536,16 +546,6 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
                   </span>
                 );
               })()
-            ) : lockedOutByOtherTeam ? (
-              <div className="flex flex-col items-center gap-3">
-                <button disabled
-                  className="w-56 h-56 rounded-full bg-gradient-to-b from-gray-300 to-gray-400 border-8 border-gray-400 shadow-inner text-white text-2xl font-bold cursor-not-allowed opacity-70">
-                  LOCKED
-                </button>
-                <span className="rounded-full px-4 py-2 text-sm font-semibold bg-gray-100 text-gray-600 border border-gray-200">
-                  <span className={arabicClass(activeBuzz?.team_name)}>{activeBuzz?.team_name || 'Another team'}</span> buzzed first!
-                </span>
-              </div>
             ) : (
               <button onClick={handleBuzz}
                 className="w-56 h-56 rounded-full bg-gradient-to-b from-red-500 to-red-700 active:from-red-700 active:to-red-900 border-[10px] border-red-800 shadow-[0_12px_32px_rgba(220,38,38,0.5)] text-white text-3xl font-extrabold tracking-wide transition-transform duration-100 active:scale-95">

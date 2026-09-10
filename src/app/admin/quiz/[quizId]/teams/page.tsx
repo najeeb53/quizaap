@@ -5,6 +5,8 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 import { hashPin, randomCode, randomPin } from '@/lib/pin';
+import { uploadTeamPhoto } from '@/lib/teamPhotos';
+import type { TeamMember } from '@/lib/liveEngine';
 
 type Team = {
   id: string;
@@ -14,6 +16,7 @@ type Team = {
   logo_url: string | null;
   status: string;
   eliminated_at: string | null;
+  members: TeamMember[] | null;
 };
 
 export default function TeamsPage() {
@@ -28,9 +31,16 @@ export default function TeamsPage() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [resetId, setResetId] = useState<string | null>(null);
   const [newPin, setNewPin] = useState<string | null>(null);
+  const [membersTeamId, setMembersTeamId] = useState<string | null>(null);
+  const [membersDraft, setMembersDraft] = useState<TeamMember[]>([]);
+  const [newMemberName, setNewMemberName] = useState('');
+  const [newMemberFile, setNewMemberFile] = useState<File | null>(null);
+  const [savingMember, setSavingMember] = useState(false);
+  const [savingMembers, setSavingMembers] = useState(false);
 
   const deleteModalRef = useRef<HTMLDialogElement>(null);
   const resetModalRef = useRef<HTMLDialogElement>(null);
+  const membersModalRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
     fetchTeams();
@@ -121,6 +131,40 @@ export default function TeamsPage() {
     fetchTeams();
   }
 
+  function openMembers(t: Team) {
+    setMembersTeamId(t.id);
+    setMembersDraft(t.members || []);
+    setNewMemberName('');
+    setNewMemberFile(null);
+    membersModalRef.current?.showModal();
+  }
+
+  async function handleAddMember() {
+    if (!newMemberName.trim() || !newMemberFile) return;
+    setSavingMember(true);
+    const url = await uploadTeamPhoto(newMemberFile);
+    setSavingMember(false);
+    if (!url) { alert('That photo failed to upload — check the team-photos storage bucket exists (migration_015) and try again.'); return; }
+    setMembersDraft(prev => [...prev, { name: newMemberName.trim(), photo_url: url }]);
+    setNewMemberName('');
+    setNewMemberFile(null);
+  }
+
+  function handleRemoveMember(idx: number) {
+    setMembersDraft(prev => prev.filter((_, i) => i !== idx));
+  }
+
+  async function handleSaveMembers() {
+    if (!membersTeamId) return;
+    setSavingMembers(true);
+    const { error } = await supabase.from('teams').update({ members: membersDraft }).eq('id', membersTeamId);
+    setSavingMembers(false);
+    if (error) { alert(`Could not save the team's members: ${error.message}`); return; }
+    membersModalRef.current?.close();
+    setMembersTeamId(null);
+    fetchTeams();
+  }
+
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-lg">
       <div className="px-8 py-6 border-b border-gray-200">
@@ -191,6 +235,9 @@ export default function TeamsPage() {
                       <button onClick={() => toggleActive(t)} className="inline-flex px-3 py-2 text-xs font-semibold text-blue-700 bg-blue-50 rounded-md hover:bg-blue-100 transition-colors">
                         {t.status === 'active' ? 'Deactivate' : 'Activate'}
                       </button>
+                      <button onClick={() => openMembers(t)} className="inline-flex px-3 py-2 text-xs font-semibold text-teal-700 bg-teal-50 rounded-md hover:bg-teal-100 transition-colors">
+                        Members {t.members && t.members.length > 0 ? `(${t.members.length})` : ''}
+                      </button>
                       <button onClick={() => openReset(t.id)} className="inline-flex px-3 py-2 text-xs font-semibold text-purple-700 bg-purple-50 rounded-md hover:bg-purple-100 transition-colors">Reset PIN</button>
                       <button onClick={() => openDelete(t.id)} className="inline-flex px-3 py-2 text-xs font-semibold text-red-700 bg-red-50 rounded-md hover:bg-red-100 transition-colors">Delete</button>
                     </div>
@@ -225,6 +272,42 @@ export default function TeamsPage() {
           {!newPin && (
             <button className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-colors shadow-md" onClick={handleResetPin}>Reset PIN</button>
           )}
+        </div>
+      </dialog>
+
+      <dialog ref={membersModalRef} className="rounded-2xl shadow-2xl p-8 max-w-lg w-full backdrop:bg-black/50">
+        <h3 className="text-2xl font-bold text-gray-900 mb-1">Team members</h3>
+        <p className="text-sm text-gray-500 mb-6">Name + photo for each member — shown on the Winners screen if this team is declared the winner.</p>
+
+        {membersDraft.length > 0 && (
+          <ul className="flex flex-col gap-2 mb-5 max-h-64 overflow-y-auto">
+            {membersDraft.map((m, i) => (
+              <li key={i} className="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+                <img src={m.photo_url} alt={m.name} className="w-10 h-10 rounded-full object-cover border border-gray-300" />
+                <span className="flex-1 text-sm font-medium text-gray-900">{m.name}</span>
+                <button onClick={() => handleRemoveMember(i)} className="text-red-600 hover:text-red-800 text-xs font-semibold">Remove</button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="flex items-center gap-2 mb-6 bg-blue-50 border border-blue-100 rounded-xl p-3">
+          <input placeholder="Member name" value={newMemberName} onChange={e => setNewMemberName(e.target.value)}
+            className="flex-1 px-3 py-2 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-sm text-gray-900 placeholder-gray-500" />
+          <input type="file" accept="image/*" onChange={e => setNewMemberFile(e.target.files?.[0] || null)}
+            className="text-xs text-gray-600 file:mr-2 file:px-3 file:py-1.5 file:rounded-md file:border-0 file:bg-blue-100 file:text-blue-700 file:text-xs file:font-semibold" />
+          <button onClick={handleAddMember} disabled={savingMember || !newMemberName.trim() || !newMemberFile}
+            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-sm transition-colors shrink-0">
+            {savingMember ? 'Adding…' : '+ Add'}
+          </button>
+        </div>
+
+        <div className="flex justify-end gap-3">
+          <button className="px-6 py-2.5 rounded-lg border-2 border-gray-300 text-gray-700 font-semibold hover:bg-gray-50 transition-colors" onClick={() => membersModalRef.current?.close()}>Cancel</button>
+          <button onClick={handleSaveMembers} disabled={savingMembers}
+            className="px-6 py-2.5 rounded-lg bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white font-semibold transition-colors shadow-md">
+            {savingMembers ? 'Saving…' : 'Save Members'}
+          </button>
         </div>
       </dialog>
     </div>

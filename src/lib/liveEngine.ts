@@ -13,6 +13,7 @@ export type LiveSession = {
   timer_state: any;
   started_at: string | null;
   ended_at: string | null;
+  winner_team_id?: string | null;
 };
 
 export type RoundRow = {
@@ -66,10 +67,17 @@ export async function getOrderedItems(sessionId: string, roundId: string) {
 
 export async function nextQuestion(sessionId: string, roundId: string, currentItemId: string | null) {
   const items = await getOrderedItems(sessionId, roundId);
-  if (items.length === 0) return { done: true };
+  // Persisted, not just a one-time alert: `round_complete` is a real display_state, so the Host
+  // and Display screens both show it on their own — even after a refresh, even if nobody was
+  // looking at the moment the last question was answered — instead of leaving the last question
+  // sitting on screen looking as if the round were still live.
+  if (items.length === 0 || (currentItemId && items.findIndex(i => i.id === currentItemId) + 1 >= items.length)) {
+    await supabase.from('live_sessions').update({ display_state: 'round_complete' }).eq('id', sessionId);
+    await logEvent(sessionId, 'round_complete', { roundId });
+    return { done: true };
+  }
   const idx = currentItemId ? items.findIndex(i => i.id === currentItemId) : -1;
   const next = items[idx + 1];
-  if (!next) return { done: true };
   const { data: round } = await supabase.from('rounds').select('timer_seconds').eq('id', roundId).single();
   await supabase.from('live_sessions').update({
     current_question_set_item_id: next.id, display_state: 'question',
@@ -390,6 +398,34 @@ export async function fetchSequenceResults(sessionId: string, itemId: string): P
   }));
 }
 
+// ---- passing (MCQ rounds only — not Buzzer, not Rapid Fire, not Sequencing, which is answered
+// simultaneously by every team rather than one team at a time) ----
+// A fixed, deliberately-smaller reward for whoever ends up answering a question other teams
+// already declined — see gradeAndReveal, which checks whether any pass exists on the item.
+export const PASS_MARKS_CORRECT = 5;
+
+/** Records that a team declined to answer — no score, no penalty. Duplicate presses for the same
+ * team on the same question hit the unique constraint; treated as a no-op, same pattern as a
+ * duplicate buzz, not an error worth surfacing. */
+export async function passQuestion(sessionId: string, itemId: string, teamId: string) {
+  const { error } = await supabase.from('question_passes').insert({
+    session_id: sessionId, question_set_item_id: itemId, team_id: teamId,
+  });
+  if (error && (error as { code?: string }).code === '23505') return { error: null };
+  return { error };
+}
+
+export type PassedTeam = { team_id: string; team_name: string };
+
+/** Every team that's passed on this question so far, in the order they passed — lets the Host
+ * screen show who's already out of the running and pick a fresh team to hand it to. */
+export async function fetchPassedTeams(sessionId: string, itemId: string): Promise<PassedTeam[]> {
+  const { data } = await supabase.from('question_passes')
+    .select('team_id, teams(name)').eq('session_id', sessionId).eq('question_set_item_id', itemId)
+    .order('passed_at');
+  return (data || []).map((p: any) => ({ team_id: p.team_id, team_name: p.teams?.name || 'Unknown team' }));
+}
+
 /** Grades all submitted answers for the current question — MCQ against the (host-only) correct
  * answer key, Sequencing against the options' correct sort_order — writes awarded_marks back
  * onto each answers row, records score transactions, and moves the session into answer_reveal. */
@@ -413,6 +449,16 @@ export async function gradeAndReveal(sessionId: string, itemId: string, roundId:
   const { data: round } = await supabase.from('rounds').select('marks_correct, marks_wrong').eq('id', roundId).single();
   const { data: answerRows } = await supabase.from('answers').select('*').eq('session_id', sessionId).eq('question_set_item_id', itemId);
 
+  // PASS_MARKS_CORRECT: once any team has passed on this question, whoever finally answers it
+  // correctly gets this fixed award instead of the round's normal marks_correct — a deliberately
+  // smaller, flat bonus since they got a question other teams already had a crack at, not their
+  // own fresh pick. A wrong answer after a pass still costs the round's normal marks_wrong;
+  // passing itself never costs anything (no row is written for the team that declines to answer).
+  const { count: passCount } = await supabase.from('question_passes')
+    .select('id', { count: 'exact', head: true })
+    .eq('session_id', sessionId).eq('question_set_item_id', itemId);
+  const effectiveMarksCorrect = (passCount || 0) > 0 ? PASS_MARKS_CORRECT : (round?.marks_correct ?? 0);
+
   let correctOrder: string[] | null = null;
   if (question?.type === 'SEQUENCE') {
     const { data: opts } = await supabase.from('question_options').select('option_key, sort_order').eq('question_id', item.question_id).order('sort_order');
@@ -432,7 +478,7 @@ export async function gradeAndReveal(sessionId: string, itemId: string, roundId:
     // marks_wrong is a penalty MAGNITUDE (how many points to dock), whichever sign it was
     // saved with — always subtract its absolute value so a round saved as either 5 or -5
     // behaves the same way, rather than a stray "-5" flipping into a +5 bonus.
-    const awarded = isCorrect ? (round?.marks_correct ?? 0) : -Math.abs(round?.marks_wrong ?? 0);
+    const awarded = isCorrect ? effectiveMarksCorrect : -Math.abs(round?.marks_wrong ?? 0);
     await supabase.from('answers').update({ is_correct: isCorrect, awarded_marks: awarded, locked_at: new Date().toISOString() }).eq('id', a.id);
     if (awarded !== 0) {
       // question_set_item_id ties the score to the question that produced it, so "Reset Question"
@@ -494,15 +540,24 @@ export async function restoreTeam(eliminationId: string, teamId: string) {
  * the first while deleting the answer rows that explained where the first one came from. Manual
  * host adjustments are deliberately kept — only auto-awarded points are taken back. */
 export async function resetCurrentQuestion(sessionId: string, itemId: string) {
-  const [answers, buzzes, scores] = await Promise.all([
+  const [answers, buzzes, scores, passes] = await Promise.all([
     supabase.from('answers').delete().eq('session_id', sessionId).eq('question_set_item_id', itemId),
     supabase.from('buzzer_events').delete().eq('session_id', sessionId).eq('question_set_item_id', itemId),
     supabase.from('scores').delete().eq('session_id', sessionId).eq('question_set_item_id', itemId)
       .in('source', ['auto_mcq', 'auto_sequence', 'auto_buzzer']),
+    supabase.from('question_passes').delete().eq('session_id', sessionId).eq('question_set_item_id', itemId),
   ]);
-  const err = answers.error || buzzes.error || scores.error;
+  const err = answers.error || buzzes.error || scores.error || passes.error;
   if (err) throw err;
-  await setDisplayState(sessionId, 'question');
+  // Re-arm the clock too, same as showing a fresh question — otherwise a re-run question kept
+  // whatever stale/expired timer_state it had before the reset (often already at 0), so the
+  // "completed in Ns" figure on a re-answered Sequencing question came out wrong or missing.
+  const { data: item } = await supabase.from('question_set_items').select('question_set_id').eq('id', itemId).single();
+  const { data: set } = item ? await supabase.from('question_sets').select('round_id').eq('id', item.question_set_id).maybeSingle() : { data: null };
+  const { data: round } = set?.round_id ? await supabase.from('rounds').select('timer_seconds').eq('id', set.round_id).maybeSingle() : { data: null };
+  await supabase.from('live_sessions').update({
+    display_state: 'question', timer_state: autoStartTimerState(round?.timer_seconds),
+  }).eq('id', sessionId);
   await logEvent(sessionId, 'question_reset', { itemId });
 }
 
@@ -514,6 +569,7 @@ export async function resetRound(sessionId: string, roundId: string) {
     await Promise.all([
       supabase.from('answers').delete().eq('session_id', sessionId).in('question_set_item_id', itemIds),
       supabase.from('buzzer_events').delete().eq('session_id', sessionId).in('question_set_item_id', itemIds),
+      supabase.from('question_passes').delete().eq('session_id', sessionId).in('question_set_item_id', itemIds),
     ]);
   }
   await supabase.from('scores').delete().eq('session_id', sessionId).eq('round_id', roundId);
@@ -567,4 +623,28 @@ export async function resetSession(sessionId: string) {
   }).eq('id', sessionId);
   if (error) throw error;
   await logEvent(sessionId, 'session_reset', {});
+}
+
+// ---- winner ----
+export type TeamMember = { name: string; photo_url: string };
+export type WinnerInfo = { team_id: string; team_name: string; logo_url: string | null; members: TeamMember[] };
+
+/** Declares a team the session's winner and moves the display straight to the Winners screen —
+ * one action for the host, rather than a separate "pick winner" step and a separate "show
+ * winners" step that could be done out of order (or forgotten). */
+export async function declareWinner(sessionId: string, teamId: string) {
+  const { error } = await supabase.from('live_sessions').update({
+    winner_team_id: teamId, display_state: 'winners',
+  }).eq('id', sessionId);
+  if (error) throw error;
+  await logEvent(sessionId, 'winner_declared', { teamId });
+}
+
+/** The declared winner's name, logo and members — null if no winner has been declared yet (e.g.
+ * a team/display screen loading before the host has clicked Declare Winner). */
+export async function fetchWinner(winnerTeamId: string | null | undefined): Promise<WinnerInfo | null> {
+  if (!winnerTeamId) return null;
+  const { data } = await supabase.from('teams').select('id, name, logo_url, members').eq('id', winnerTeamId).maybeSingle();
+  if (!data) return null;
+  return { team_id: data.id, team_name: data.name, logo_url: data.logo_url, members: (data.members as TeamMember[]) || [] };
 }
