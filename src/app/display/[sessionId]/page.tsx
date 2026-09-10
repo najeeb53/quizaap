@@ -9,6 +9,8 @@ import { arabicClass, arabicDir } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
 import { questionImages } from '@/lib/media';
 import { warmDbClock, dbNowMs } from '@/lib/serverClock';
+import { useLiveConnection, useWakeLock } from '@/lib/liveConnection';
+import { ConnectionBadge } from '@/components/ConnectionBadge';
 
 // No `answer` field: the correct answer is fetched only once the host reveals it (see the
 // revealedAnswer effect below). It used to be pulled in with the question itself, which put the
@@ -37,10 +39,6 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
 
   useEffect(() => {
     supabase.from('live_sessions').select('*').eq('id', sessionId).single().then(({ data }) => setSessionData(data));
-    const sub = supabase.channel(`display:${sessionId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'live_sessions', filter: `id=eq.${sessionId}` }, payload => setSessionData(payload.new))
-      .subscribe();
-    return () => { supabase.removeChannel(sub); };
   }, [sessionId]);
 
   const prevBuzzCount = useRef(0);
@@ -72,13 +70,47 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
   const refreshBuzzRef = useRef(refreshBuzz);
   useEffect(() => { refreshBuzzRef.current = refreshBuzz; }, [refreshBuzz]);
 
+  /** Re-read everything this screen shows, straight from the database. Used when realtime drops or
+   *  the machine wakes — a channel that was down missed its events outright, and realtime has no
+   *  replay, so reconnecting without this leaves the projector confidently showing stale content.
+   *  Reads the buzz list against the session row it just fetched rather than component state, so it
+   *  can't resync the previous question's buzzes. */
+  const resyncAll = useCallback(async () => {
+    const { data: s } = await supabase.from('live_sessions').select('*').eq('id', sessionId).single();
+    if (!s) return;
+    setSessionData(s);
+    if (s.current_question_set_item_id) {
+      const { data: bz } = await supabase.from('buzzer_events').select('team_id, status, teams(name)')
+        .eq('session_id', sessionId).eq('question_set_item_id', s.current_question_set_item_id).order('buzzed_at');
+      const rows = (bz || []).map((b: any) => ({ team_id: b.team_id, status: b.status, team_name: b.teams?.name }));
+      // Catching up is not the same as a team buzzing in — don't sound the alert for buzzes that
+      // happened while this screen was disconnected.
+      prevBuzzCount.current = rows.length;
+      setBuzzOrder(rows);
+      const active = rows.find(r => r.status !== 'rejected') || null;
+      setBuzzFirst(active ? `${active.team_name} (${active.status})` : null);
+    } else {
+      prevBuzzCount.current = 0;
+      setBuzzOrder([]);
+      setBuzzFirst(null);
+    }
+    if (s.quiz_id) await fetchScoreboard(s.quiz_id, sessionId).then(setScoreboard).catch(() => {});
+  }, [sessionId]);
+
+  const { status: liveStatus, channelKey, onChannelStatus } = useLiveConnection(resyncAll);
+  // A projector that blanks itself between questions is the most visible failure there is.
+  useWakeLock(true);
+
+  // One channel for both tables — one subscription instead of two, and one status to report.
   useEffect(() => {
-    const sub = supabase.channel(`display-buzz:${sessionId}`)
+    const sub = supabase.channel(`display:${sessionId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'live_sessions', filter: `id=eq.${sessionId}` },
+        payload => setSessionData(payload.new))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` },
         () => refreshBuzzRef.current())
-      .subscribe();
+      .subscribe(onChannelStatus);
     return () => { supabase.removeChannel(sub); };
-  }, [sessionId]);
+  }, [sessionId, channelKey, onChannelStatus]);
 
   useEffect(() => {
     async function load() {
@@ -209,6 +241,13 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
 
   return (
     <div className="w-full max-w-6xl text-center">
+      {/* Fixed to the corner rather than in the flow, so it never nudges the centred stage layout.
+          Invisible while healthy — it only appears if the projector has stopped receiving updates,
+          which is otherwise indistinguishable from a quiet moment in the show. */}
+      <div className="fixed top-4 right-4 z-50">
+        <ConnectionBadge status={liveStatus} variant="dark" className="text-sm" />
+      </div>
+
       {state === 'idle' && (
         <>
           <h1 className="text-8xl font-bold mb-8 bg-gradient-to-r from-blue-400 via-purple-400 to-teal-400 bg-clip-text text-transparent">Live Quiz Show</h1>

@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, Fragment } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { arabicClass, arabicDir, containsArabic } from '@/lib/textDir';
 import Papa from 'papaparse';
 
 type Option = { id: string; option_key: string; option_text: string; sort_order?: number };
@@ -144,7 +145,10 @@ function QuestionForm({ form, setForm, mediaFiles, setMediaFiles, saving, onSubm
           value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}>
           {QUESTION_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
         </select>
-        <input required placeholder="Category name" className="px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
+        {/* dir/font flip automatically as soon as Arabic is typed, so Arabic reads right-to-left
+            while you enter it rather than only once it's saved. */}
+        <input required placeholder="Category name" dir={arabicDir(form.category)}
+          className={`px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500 ${arabicClass(form.category)}`}
           value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} />
         {/* A dropdown, not free text: difficulty is matched case-sensitively when ordering the
             round's tiers, so a typed "easy" or "Easy " played out of order. */}
@@ -153,8 +157,8 @@ function QuestionForm({ form, setForm, mediaFiles, setMediaFiles, saving, onSubm
           <option value="">— select difficulty —</option>
           {DIFFICULTIES.map(d => <option key={d} value={d}>{d}</option>)}
         </select>
-        <textarea required placeholder={isPicture ? 'Prompt (e.g. "Identify this landmark")' : 'Question text'}
-          className="col-span-2 px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500" rows={3}
+        <textarea required placeholder={isPicture ? 'Prompt (e.g. "Identify this landmark")' : 'Question text'} dir={arabicDir(form.text)}
+          className={`col-span-2 px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500 ${arabicClass(form.text)}`} rows={3}
           value={form.text} onChange={e => setForm(f => ({ ...f, text: e.target.value }))} />
 
         {isPicture ? (
@@ -190,7 +194,8 @@ function QuestionForm({ form, setForm, mediaFiles, setMediaFiles, saving, onSubm
                 </div>
               )}
             </div>
-            <input required placeholder="Reference answer (host only — for judging buzzes)" className="col-span-2 px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
+            <input required placeholder="Reference answer (host only — for judging buzzes)" dir={arabicDir(form.correct)}
+              className={`col-span-2 px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500 ${arabicClass(form.correct)}`}
               value={form.correct} onChange={e => setForm(f => ({ ...f, correct: e.target.value }))} />
           </>
         ) : isSequence ? (
@@ -199,7 +204,8 @@ function QuestionForm({ form, setForm, mediaFiles, setMediaFiles, saving, onSubm
             {form.sequenceItems.map((item, i) => (
               <div key={i} className="flex items-center gap-3 bg-gray-50 p-4 rounded-lg border border-gray-200">
                 <span className="text-sm font-bold text-gray-500 w-6 text-center">{i + 1}</span>
-                <input required placeholder={`Item ${i + 1}`} className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900"
+                <input required placeholder={`Item ${i + 1}`} dir={arabicDir(item)}
+                  className={`flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 ${arabicClass(item)}`}
                   value={item} onChange={e => updateItem(i, e.target.value)} />
                 <button type="button" onClick={() => moveItem(i, -1)} disabled={i === 0}
                   className="text-blue-600 disabled:opacity-30 hover:text-blue-700 font-bold px-3 py-2">↑</button>
@@ -213,16 +219,33 @@ function QuestionForm({ form, setForm, mediaFiles, setMediaFiles, saving, onSubm
           </div>
         ) : (
           <>
-            <input required placeholder="Option A" className="px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
-              value={form.optionA} onChange={e => setForm(f => ({ ...f, optionA: e.target.value }))} />
-            <input required placeholder="Option B" className="px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
-              value={form.optionB} onChange={e => setForm(f => ({ ...f, optionB: e.target.value }))} />
-            <input required placeholder="Option C" className="px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
-              value={form.optionC} onChange={e => setForm(f => ({ ...f, optionC: e.target.value }))} />
-            <input required placeholder="Option D" className="px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
-              value={form.optionD} onChange={e => setForm(f => ({ ...f, optionD: e.target.value }))} />
-            <input required placeholder="Correct answer (A/B/C/D)" className="col-span-2 px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
-              value={form.correct} onChange={e => setForm(f => ({ ...f, correct: e.target.value.toUpperCase() }))} />
+            {(['A', 'B', 'C', 'D'] as const).map(key => {
+              const field = (`option${key}`) as 'optionA' | 'optionB' | 'optionC' | 'optionD';
+              const value = form[field];
+              return (
+                <div key={key} className="flex flex-col gap-1">
+                  <label className="text-xs font-semibold text-gray-500 px-1">Option {key}</label>
+                  <input required placeholder={`Option ${key}`} dir={arabicDir(value)}
+                    className={`px-4 py-3 border-2 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500 ${form.correct === key ? 'border-green-400 bg-green-50' : 'border-gray-300'} ${arabicClass(value)}`}
+                    value={value} onChange={e => setForm(f => ({ ...f, [field]: e.target.value }))} />
+                </div>
+              );
+            })}
+            {/* A dropdown showing the option TEXT, not a letter to retype. The old free-text box
+                accepted anything — a stray "b" or the answer's text instead of its letter saved
+                fine and then marked every team wrong on the night. */}
+            <div className="col-span-2 flex flex-col gap-1">
+              <label className="text-xs font-semibold text-gray-500 px-1">Correct answer</label>
+              <select required value={form.correct} onChange={e => setForm(f => ({ ...f, correct: e.target.value }))}
+                dir={arabicDir(form[(`option${form.correct}`) as 'optionA'] ?? '')}
+                className={`px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 ${arabicClass(form[(`option${form.correct}`) as 'optionA'] ?? '')}`}>
+                <option value="">— select the correct option —</option>
+                {(['A', 'B', 'C', 'D'] as const).map(key => {
+                  const text = form[(`option${key}`) as 'optionA' | 'optionB' | 'optionC' | 'optionD'];
+                  return <option key={key} value={key}>{key}{text ? ` — ${text}` : ''}</option>;
+                })}
+              </select>
+            </div>
           </>
         )}
       </div>
@@ -252,10 +275,29 @@ export default function QuestionBankPage() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // ── search + sort (243+ questions means scrolling to find one is a real problem) ─────────
+  // ── search + facets + sort + paging (hundreds of questions means scrolling to find one is a
+  // real problem; free-text search alone still left you reading the whole list) ────────────────
   const [search, setSearch] = useState('');
+  const [filterCategory, setFilterCategory] = useState('');
+  const [filterType, setFilterType] = useState('');
+  const [filterDifficulty, setFilterDifficulty] = useState('');
   const [sortKey, setSortKey] = useState<'text' | 'type' | 'difficulty' | 'category' | 'answer'>('text');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  // Which row is opened out to show its full options/order inline — so checking an answer doesn't
+  // mean opening the edit form (and risking saving a change you didn't mean to make).
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 50;
+
+  const activeFilterCount = [search.trim(), filterCategory, filterType, filterDifficulty].filter(Boolean).length;
+
+  function clearFilters() {
+    setSearch(''); setFilterCategory(''); setFilterType(''); setFilterDifficulty('');
+  }
+
+  // Any change to what's being filtered puts you back on page 1 — otherwise narrowing a search
+  // while on page 4 shows an empty table and looks like "no results".
+  useEffect(() => { setPage(0); }, [search, filterCategory, filterType, filterDifficulty, sortKey, sortDir]);
 
   function toggleSort(key: typeof sortKey) {
     if (key === sortKey) {
@@ -272,15 +314,23 @@ export default function QuestionBankPage() {
   // here rather than inside the sort comparator, which would otherwise re-run categories.find()
   // for every pairwise comparison during the sort.
   const visibleQuestions = useMemo(() => {
-    const withCategoryName = questions.map(q => ({ q, categoryName: categories.find(c => c.id === q.category_id)?.name || '' }));
+    const byId = new Map(categories.map(c => [c.id, c.name]));
+    const withCategoryName = questions.map(q => ({ q, categoryName: byId.get(q.category_id) || '' }));
 
     const term = search.trim().toLowerCase();
-    const filtered = term
-      ? withCategoryName.filter(({ q, categoryName }) =>
-          q.text.toLowerCase().includes(term) ||
-          categoryName.toLowerCase().includes(term) ||
-          (q.answer || '').toLowerCase().includes(term))
-      : withCategoryName;
+    const filtered = withCategoryName.filter(({ q, categoryName }) => {
+      if (filterCategory && q.category_id !== filterCategory) return false;
+      if (filterType && q.type !== filterType) return false;
+      if (filterDifficulty && q.difficulty !== filterDifficulty) return false;
+      if (!term) return true;
+      // Option text is searched too. Without it you could only find a question by its wording or
+      // by an answer KEY ("B"), never by the answer itself — so looking up "which question has
+      // Riyadh as an option" meant reading the whole list.
+      return q.text.toLowerCase().includes(term)
+        || categoryName.toLowerCase().includes(term)
+        || (q.answer || '').toLowerCase().includes(term)
+        || (q.options || []).some(o => (o.option_text || '').toLowerCase().includes(term));
+    });
 
     const dir = sortDir === 'asc' ? 1 : -1;
     const sorted = [...filtered].sort((a, b) => {
@@ -293,7 +343,41 @@ export default function QuestionBankPage() {
       return cmp * dir;
     });
     return sorted.map(({ q }) => q);
-  }, [questions, categories, search, sortKey, sortDir]);
+  }, [questions, categories, search, filterCategory, filterType, filterDifficulty, sortKey, sortDir]);
+
+  // Only the current page is rendered. The bank loads up to 10,000 rows, and putting every one of
+  // them in the DOM made the table sluggish to scroll and to filter.
+  const pageCount = Math.max(1, Math.ceil(visibleQuestions.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount - 1);
+  const pagedQuestions = visibleQuestions.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+
+  /** How many questions sit in each category / type / difficulty, so the filter dropdowns show
+   *  where the questions actually are — and which categories are too thin to build a round from. */
+  const counts = useMemo(() => {
+    const category: Record<string, number> = {};
+    const type: Record<string, number> = {};
+    const difficulty: Record<string, number> = {};
+    for (const q of questions) {
+      category[q.category_id] = (category[q.category_id] || 0) + 1;
+      type[q.type] = (type[q.type] || 0) + 1;
+      difficulty[q.difficulty] = (difficulty[q.difficulty] || 0) + 1;
+    }
+    return { category, type, difficulty };
+  }, [questions]);
+
+  /** The correct answer in readable form: the winning option's text for an MCQ (not just "B"), the
+   *  full order for a Sequencing question, the reference answer for a Picture question. */
+  function answerSummary(q: Question): string {
+    if (q.type === 'SEQUENCE') {
+      const ordered = [...(q.options || [])].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+      return ordered.length > 0 ? ordered.map(o => o.option_text).join('  →  ') : '—';
+    }
+    if (q.type === 'MCQ') {
+      const match = (q.options || []).find(o => o.option_key === q.answer);
+      return match ? `${q.answer}. ${match.option_text}` : (q.answer || '—');
+    }
+    return q.answer || '—';
+  }
 
   const addModalRef = useRef<HTMLDialogElement>(null);
   const editModalRef = useRef<HTMLDialogElement>(null);
@@ -308,13 +392,21 @@ export default function QuestionBankPage() {
     // .range() past the default 1000-row cap: without it, once the bank grew past 1000 questions
     // the extras simply stopped appearing here, with no error — they look deleted, and get
     // re-imported.
+    // `options:question_options(...)` — the ALIAS matters. Without it PostgREST returns the
+    // relation under its own table name, `question_options`, while every reader here (the Answer
+    // Key column, openEdit) looks at `q.options` — so options were silently always empty. The
+    // `as any[]` cast below hid the mismatch from the type checker. Two visible symptoms:
+    // Sequencing questions showed "—" instead of their correct order, and opening Edit came up
+    // with blank options, so changing one word meant retyping the question and every answer.
     const [{ data: qs, error: qErr }, { data: cats }] = await Promise.all([
-      supabase.from('questions').select('*, question_options(id,option_key,option_text,sort_order)').order('text').range(0, 9999),
+      supabase.from('questions').select('*, options:question_options(id,option_key,option_text,sort_order)').order('text').range(0, 9999),
       supabase.from('categories').select('id,name').order('name').range(0, 4999),
     ]);
     // A failed load must not look like an empty bank.
     if (qErr) { setLoading(false); alert(`Could not load the question bank: ${qErr.message}`); return; }
-    setQuestions((qs as any[]) || []);
+    // Typed, not `as any[]` — the cast is what let the options/question_options mismatch above go
+    // unnoticed for so long.
+    setQuestions((qs as Question[] | null) || []);
     setCategories(cats || []);
     setLoading(false);
   }
@@ -631,21 +723,68 @@ export default function QuestionBankPage() {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="px-8 py-4 border-b border-gray-200 bg-gray-50">
-        <div className="relative max-w-md">
-          <input
-            type="text"
-            placeholder="🔎 Search by question text, category, or answer…"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            className="w-full px-4 py-2.5 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500 bg-white"
-          />
-          {search && (
-            <button type="button" onClick={() => setSearch('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 font-bold">✕</button>
+      {/* Search + facets. Counts are shown in each dropdown so you can see where the questions
+          actually are — and spot a category too thin to build a round from. */}
+      <div className="px-8 py-4 border-b border-gray-200 bg-gray-50 flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[16rem]">
+            <input
+              type="text"
+              placeholder="🔎 Search question, option text, category or answer…"
+              value={search}
+              dir={arabicDir(search)}
+              onChange={e => setSearch(e.target.value)}
+              className={`w-full px-4 py-2.5 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500 bg-white ${arabicClass(search)}`}
+            />
+            {search && (
+              <button type="button" onClick={() => setSearch('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 font-bold">✕</button>
+            )}
+          </div>
+
+          <select value={filterCategory} onChange={e => setFilterCategory(e.target.value)}
+            className="px-3 py-2.5 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 bg-white max-w-[14rem]">
+            <option value="">All categories</option>
+            {categories.map(c => (
+              <option key={c.id} value={c.id}>{c.name} ({counts.category[c.id] || 0})</option>
+            ))}
+          </select>
+
+          <select value={filterType} onChange={e => setFilterType(e.target.value)}
+            className="px-3 py-2.5 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 bg-white">
+            <option value="">All types</option>
+            {QUESTION_TYPES.map(t => (
+              <option key={t.value} value={t.value}>{t.label} ({counts.type[t.value] || 0})</option>
+            ))}
+          </select>
+
+          <select value={filterDifficulty} onChange={e => setFilterDifficulty(e.target.value)}
+            className="px-3 py-2.5 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 bg-white">
+            <option value="">All difficulties</option>
+            {DIFFICULTIES.map(d => (
+              <option key={d} value={d}>{d} ({counts.difficulty[d] || 0})</option>
+            ))}
+          </select>
+
+          {activeFilterCount > 0 && (
+            <button type="button" onClick={clearFilters}
+              className="px-3 py-2.5 rounded-lg border-2 border-gray-300 text-gray-700 text-sm font-semibold hover:bg-white transition-colors">
+              Clear {activeFilterCount} filter{activeFilterCount === 1 ? '' : 's'}
+            </button>
           )}
         </div>
+
+        {/* Where a round's questions come from is (category × difficulty), so when you've narrowed
+            to one category this is the number that tells you whether a round can be built. */}
+        {filterCategory && (
+          <p className="text-xs text-gray-600">
+            {DIFFICULTIES.map(d => {
+              const n = questions.filter(q => q.category_id === filterCategory && q.difficulty === d && (!filterType || q.type === filterType)).length;
+              return <span key={d} className="mr-4"><strong className={n === 0 ? 'text-red-600' : 'text-gray-800'}>{n}</strong> {d}</span>;
+            })}
+            <span className="text-gray-400">· in this category{filterType ? ' and type' : ''}</span>
+          </p>
+        )}
       </div>
 
       {/* Table */}
@@ -654,7 +793,13 @@ export default function QuestionBankPage() {
       ) : questions.length === 0 ? (
         <p className="p-8 text-gray-600 text-center">No questions yet. Add one or import a CSV.</p>
       ) : visibleQuestions.length === 0 ? (
-        <p className="p-8 text-gray-600 text-center">No questions match "{search}".</p>
+        <div className="p-8 text-center">
+          <p className="text-gray-600">No questions match the current filters.</p>
+          <button type="button" onClick={clearFilters}
+            className="mt-3 px-4 py-2 rounded-lg border-2 border-gray-300 text-gray-700 text-sm font-semibold hover:bg-gray-50 transition-colors">
+            Clear filters
+          </button>
+        </div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
@@ -679,8 +824,9 @@ export default function QuestionBankPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {visibleQuestions.map((q, idx) => (
-                <tr key={q.id} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-blue-50 transition-colors`}>
+              {pagedQuestions.map((q, idx) => (
+                <Fragment key={q.id}>
+                <tr className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-blue-50 transition-colors`}>
                   <td className="px-6 py-4 max-w-sm">
                     <div className="flex items-center gap-3">
                       {q.type === 'PICTURE' && (q.media_urls?.[0] || q.media_url) && (
@@ -694,7 +840,15 @@ export default function QuestionBankPage() {
                           )}
                         </div>
                       )}
-                      <span className="truncate text-gray-900 font-medium" title={q.text}>{q.text}</span>
+                      {/* Opens the row out rather than opening the edit form — checking an answer
+                          shouldn't put you in a form you might accidentally save. */}
+                      <button type="button" onClick={() => setExpandedId(id => (id === q.id ? null : q.id))}
+                        className="shrink-0 w-5 h-5 rounded border border-gray-300 bg-white text-gray-500 text-[10px] font-bold leading-none hover:bg-gray-100 transition-colors"
+                        aria-label={expandedId === q.id ? 'Hide options' : 'Show options'}
+                        title={expandedId === q.id ? 'Hide options' : 'Show options'}>
+                        {expandedId === q.id ? '−' : '+'}
+                      </button>
+                      <span dir={arabicDir(q.text)} className={`truncate text-gray-900 font-medium ${arabicClass(q.text)}`} title={q.text}>{q.text}</span>
                     </div>
                   </td>
                   <td className="px-6 py-4">
@@ -711,14 +865,24 @@ export default function QuestionBankPage() {
                       'bg-red-100 text-red-800'
                     }`}>{q.difficulty}</span>
                   </td>
-                  <td className="px-6 py-4 text-gray-700 font-medium">{categories.find(c => c.id === q.category_id)?.name || '—'}</td>
-                  <td className="px-6 py-4 font-mono text-xs text-gray-700 bg-gray-100 px-3 py-2 rounded inline-block">
-                    {q.type === 'SEQUENCE'
-                      ? (q.options || []).length > 0
-                        ? [...q.options!].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)).map(o => o.option_text).join(' → ')
-                        : '—'
-                      : q.answer}
-                  </td>
+                  {(() => {
+                    const catName = categories.find(c => c.id === q.category_id)?.name || '—';
+                    return <td dir={arabicDir(catName)} className={`px-6 py-4 text-gray-700 font-medium ${arabicClass(catName)}`}>{catName}</td>;
+                  })()}
+                  {(() => {
+                    // Shows the answer TEXT, not just the key — "B" on its own told you nothing
+                    // without opening the question.
+                    const summary = answerSummary(q);
+                    return (
+                      <td className="px-6 py-4 max-w-xs">
+                        <span dir={arabicDir(summary)}
+                          className={`block text-xs text-gray-700 bg-gray-100 px-3 py-2 rounded truncate ${containsArabic(summary) ? 'font-arabic text-right' : 'font-mono'}`}
+                          title={summary}>
+                          {summary}
+                        </span>
+                      </td>
+                    );
+                  })()}
                   <td className="px-6 py-4 text-right">
                     <div className="flex gap-2 justify-end">
                       <button onClick={() => openEdit(q)}
@@ -728,9 +892,93 @@ export default function QuestionBankPage() {
                     </div>
                   </td>
                 </tr>
+
+                {expandedId === q.id && (
+                  <tr className="bg-blue-50/60">
+                    <td colSpan={6} className="px-6 py-5">
+                      <div className="flex flex-col gap-4">
+                        <div>
+                          <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-1">Full question</p>
+                          <p dir={arabicDir(q.text)} className={`text-sm text-gray-900 ${arabicClass(q.text)}`}>{q.text}</p>
+                        </div>
+
+                        {q.type === 'MCQ' && (
+                          <div>
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2">Options · correct one highlighted</p>
+                            <ul className="flex flex-col gap-1.5 max-w-2xl">
+                              {['A', 'B', 'C', 'D'].map(key => {
+                                const opt = (q.options || []).find(o => o.option_key === key);
+                                const isCorrect = q.answer === key;
+                                return (
+                                  <li key={key} dir={arabicDir(opt?.option_text)}
+                                    className={`text-sm rounded-lg border px-3 py-2 ${isCorrect ? 'bg-green-50 border-green-300 text-green-900 font-semibold' : 'bg-white border-gray-200 text-gray-700'} ${arabicClass(opt?.option_text)}`}>
+                                    <span className="font-bold mr-2">{key}.</span>{opt?.option_text || <span className="italic text-red-600">missing</span>}
+                                    {isCorrect && <span className="ml-2 text-xs">✓ correct</span>}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        )}
+
+                        {q.type === 'SEQUENCE' && (
+                          <div>
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2">Correct order · top is first</p>
+                            <ol className="flex flex-col gap-1.5 max-w-2xl">
+                              {[...(q.options || [])].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)).map((o, i) => (
+                                <li key={o.id || i} dir={arabicDir(o.option_text)}
+                                  className={`text-sm rounded-lg border border-teal-200 bg-teal-50 text-teal-900 px-3 py-2 ${arabicClass(o.option_text)}`}>
+                                  <span className="font-bold mr-2">{i + 1}.</span>{o.option_text}
+                                </li>
+                              ))}
+                              {(q.options || []).length === 0 && (
+                                <li className="text-sm italic text-red-600">No sequence items saved — this question can't be graded.</li>
+                              )}
+                            </ol>
+                          </div>
+                        )}
+
+                        {q.type === 'PICTURE' && (
+                          <div className="flex flex-col gap-2">
+                            <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500">Images · reference answer</p>
+                            <div className="flex flex-wrap gap-2">
+                              {(q.media_urls && q.media_urls.length > 0 ? q.media_urls : (q.media_url ? [q.media_url] : [])).map(url => (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img key={url} src={url} alt="" className="h-28 rounded-lg border border-gray-300 object-cover" />
+                              ))}
+                            </div>
+                            <p dir={arabicDir(q.answer)} className={`text-sm text-gray-900 ${arabicClass(q.answer)}`}>{q.answer || '—'}</p>
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>
+
+          {pageCount > 1 && (
+            <div className="flex items-center justify-between gap-4 px-6 py-4 border-t border-gray-200 bg-gray-50">
+              <p className="text-sm text-gray-600">
+                Showing <strong>{safePage * PAGE_SIZE + 1}–{Math.min(visibleQuestions.length, safePage * PAGE_SIZE + PAGE_SIZE)}</strong> of {visibleQuestions.length}
+              </p>
+              <div className="flex items-center gap-2">
+                {/* Stepped from safePage, not the raw page value, so a stale page index left over
+                    from a wider result set can't make the first click go nowhere. */}
+                <button type="button" onClick={() => setPage(Math.max(0, safePage - 1))} disabled={safePage === 0}
+                  className="px-3 py-2 rounded-lg border-2 border-gray-300 text-gray-700 text-sm font-semibold hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                  ← Prev
+                </button>
+                <span className="text-sm text-gray-600 px-2">Page {safePage + 1} of {pageCount}</span>
+                <button type="button" onClick={() => setPage(Math.min(pageCount - 1, safePage + 1))} disabled={safePage >= pageCount - 1}
+                  className="px-3 py-2 rounded-lg border-2 border-gray-300 text-gray-700 text-sm font-semibold hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                  Next →
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -18,6 +18,8 @@ import { arabicClass, arabicDir } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
 import { questionImages } from '@/lib/media';
 import { warmDbClock, dbNowMs } from '@/lib/serverClock';
+import { useLiveConnection, useWakeLock } from '@/lib/liveConnection';
+import { ConnectionBadge } from '@/components/ConnectionBadge';
 
 type Question = { id: string; text: string; type: string; answer: string; media_url: string | null; media_urls?: string[] | null };
 type Option = { option_key: string; option_text: string };
@@ -346,6 +348,12 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     setSeqSubmittedCount(count || 0);
   }, [sessionId]);
 
+  // refreshAll IS the authoritative "re-read everything" pass, so it doubles as the recovery path
+  // when realtime drops or this laptop wakes from sleep.
+  const { status: liveStatus, channelKey, onChannelStatus } = useLiveConnection(refreshAll);
+  // The host's laptop going to sleep mid-round takes the whole show down with it.
+  useWakeLock(true);
+
   // Each table refreshes only what it actually affects, and the channel is subscribed ONCE for the
   // life of the session (handlers read through refs). Previously every event on any of these five
   // tables ran the full refreshAll, so a single buzz cost a dozen queries — the single biggest
@@ -364,9 +372,11 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
       // An elimination changes both the scoreboard's eliminated flags and the round's tally.
       .on('postgres_changes', { event: '*', schema: 'public', table: 'eliminations', filter: `session_id=eq.${sessionId}` },
         () => { const s = sessionRef.current; if (s?.quiz_id) fetchScores(s.quiz_id); fetchRoundExtras(s); })
-      .subscribe();
+      // channelKey in the deps lets useLiveConnection tear this down and rebuild it if it stays
+      // dead — Supabase's own retry can't always recover a socket killed by a closed laptop lid.
+      .subscribe(onChannelStatus);
     return () => { supabase.removeChannel(sub); };
-  }, [sessionId, fetchBuzzers, fetchScores, fetchSeqSubmittedCount, fetchRoundExtras]);
+  }, [sessionId, channelKey, onChannelStatus, fetchBuzzers, fetchScores, fetchSeqSubmittedCount, fetchRoundExtras]);
 
   // One clock for the whole show: measure this browser's offset from the database clock up front,
   // so the countdown and every "completed in Ns" figure agree with the timestamps Postgres writes.
@@ -558,7 +568,11 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     <div className="flex flex-col gap-6 bg-gradient-to-b from-gray-900 to-gray-950 min-h-screen p-6 -m-6">
       <div className="flex items-center justify-between bg-gray-800/60 backdrop-blur border border-gray-700 rounded-2xl shadow-xl p-4">
         <div>
-          <h2 className="text-xl font-bold text-white">Live Session</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-bold text-white">Live Session</h2>
+            {/* Renders nothing while healthy — see ConnectionBadge. */}
+            <ConnectionBadge status={liveStatus} variant="dark" />
+          </div>
           <p className="text-sm text-gray-400">
             Status: <span className="font-semibold text-gray-200">{session.status}</span>
             {round ? <> · <span className="text-blue-400">{round.name}</span></> : ''}

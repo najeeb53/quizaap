@@ -9,6 +9,8 @@ import { questionTypeForRound } from '@/lib/questionSet';
 import { playBuzzSound } from '@/lib/buzzSound';
 import { questionImages } from '@/lib/media';
 import { warmDbClock, dbNowMs } from '@/lib/serverClock';
+import { useLiveConnection, useWakeLock } from '@/lib/liveConnection';
+import { ConnectionBadge } from '@/components/ConnectionBadge';
 
 type Team = { id: string; quiz_id: string; name: string; pin_hash: string; eliminated_at: string | null };
 type Question = { id: string; text: string; type: string; media_url: string | null; media_urls?: string[] | null };
@@ -81,14 +83,8 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   // host and projector are scoring against, not this phone's own idea of the time.
   useEffect(() => { if (sessionId) warmDbClock(sessionId); }, [sessionId]);
 
-  // 3. subscribe to session state
-  useEffect(() => {
-    if (!sessionId) return;
-    const sub = supabase.channel(`team:${sessionId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'live_sessions', filter: `id=eq.${sessionId}` }, payload => setSessionData(payload.new))
-      .subscribe();
-    return () => { supabase.removeChannel(sub); };
-  }, [sessionId]);
+  // 3. subscribe to session state — the channel itself lives further down, merged with the buzzer
+  // subscription, so both share one socket and one connection status (see resyncAll below).
 
   // 4. fetch round type + question (no answer key!) whenever current item changes
   useEffect(() => {
@@ -205,14 +201,52 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   const refreshBuzzOrderRef = useRef(refreshBuzzOrder);
   useEffect(() => { refreshBuzzOrderRef.current = refreshBuzzOrder; }, [refreshBuzzOrder]);
 
+  /** Re-read everything this phone shows, straight from the database — for when realtime drops or
+   *  the phone comes back from being locked/backgrounded. Realtime has no replay, so a channel that
+   *  was down missed its events for good: without this, a team's screen can sit on the previous
+   *  question, or on a stale "Buzzed! Waiting for host…", with no sign anything is wrong.
+   *
+   *  The buzz list is read against the session row just fetched rather than through
+   *  refreshBuzzOrder, whose captured closure would still be pointing at the OLD question. */
+  const resyncAll = useCallback(async () => {
+    if (!team) return;
+    const { data: s } = await supabase.from('live_sessions').select('*')
+      .eq('quiz_id', team.quiz_id).neq('status', 'ended')
+      .order('started_at', { ascending: false }).limit(1).maybeSingle();
+    setSessionId(s?.id || null);
+    setSessionData(s || null);
+
+    // Our own row too — an elimination applied while this phone was away would otherwise keep
+    // showing the buzzer to a team that is out.
+    const { data: t } = await supabase.from('teams')
+      .select('id, quiz_id, name, pin_hash, eliminated_at').eq('id', team.id).maybeSingle();
+    if (t) setTeam(t);
+
+    if (s?.id && s.current_question_set_item_id) {
+      const { data: bz } = await supabase.from('buzzer_events').select('team_id, status, teams(name)')
+        .eq('session_id', s.id).eq('question_set_item_id', s.current_question_set_item_id).order('buzzed_at');
+      setBuzzOrder((bz || []).map((b: any) => ({ team_id: b.team_id, status: b.status, team_name: b.teams?.name })));
+    } else {
+      setBuzzOrder([]);
+    }
+  }, [team]);
+
+  const { status: liveStatus, channelKey, onChannelStatus } = useLiveConnection(resyncAll);
+  // A phone that has locked itself can't buzz. Held only while the tab is actually visible, so it
+  // doesn't fight the team's own use of their device.
+  useWakeLock(true);
+
+  // Session state and buzzes on one channel — one socket, one status to report.
   useEffect(() => {
     if (!sessionId) return;
-    const sub = supabase.channel(`team-buzz:${sessionId}:${teamCode}`)
+    const sub = supabase.channel(`team:${sessionId}:${teamCode}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'live_sessions', filter: `id=eq.${sessionId}` },
+        payload => setSessionData(payload.new))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` },
         () => refreshBuzzOrderRef.current())
-      .subscribe();
+      .subscribe(onChannelStatus);
     return () => { supabase.removeChannel(sub); };
-  }, [sessionId, teamCode]);
+  }, [sessionId, teamCode, channelKey, onChannelStatus]);
 
   // myBuzz is DERIVED from the live buzz list rather than held as its own state. Held separately,
   // it was only ever cleared when the question changed — so after the host hit "Reset Buzzer"
@@ -401,6 +435,10 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   return (
     <div className={`flex flex-col items-center justify-center min-h-[60vh] gap-6 w-full max-w-lg mx-auto px-4 py-6 ${arabicClass(team.name)}`}>
       <h2 className={`text-2xl font-bold text-gray-900 tracking-tight ${arabicClass(team.name)}`}>{team.name}</h2>
+
+      {/* Nothing while healthy. Shown here so a team can tell "the host hasn't moved on yet" apart
+          from "my phone has silently stopped receiving updates" — previously identical on screen. */}
+      <ConnectionBadge status={liveStatus} variant="light" />
 
       {/* The countdown, so teams can see how long they've got instead of guessing. Buzzer rounds
           have no time limit to answer once buzzed — it's a race to buzz, not a countdown — so the
