@@ -640,6 +640,17 @@ export async function declareWinner(sessionId: string, teamId: string) {
   await logEvent(sessionId, 'winner_declared', { teamId });
 }
 
+/** Undoes a Declare Winner — clears the winner and drops the display back to the scoreboard, so a
+ * host who confirmed the wrong team (or is just re-running a trial) isn't stuck on the Winners
+ * screen with no way back. */
+export async function resetWinner(sessionId: string) {
+  const { error } = await supabase.from('live_sessions').update({
+    winner_team_id: null, display_state: 'scoreboard',
+  }).eq('id', sessionId);
+  if (error) throw error;
+  await logEvent(sessionId, 'winner_reset', {});
+}
+
 /** The declared winner's name, logo and members — null if no winner has been declared yet (e.g.
  * a team/display screen loading before the host has clicked Declare Winner). */
 export async function fetchWinner(winnerTeamId: string | null | undefined): Promise<WinnerInfo | null> {

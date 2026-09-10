@@ -10,7 +10,7 @@ import {
   eliminateTeam, resetSession, resetCurrentQuestion, resetRound, resetScores,
   fetchPickItems, computeCurrentTierAsync, type TierResult, setCurrentPicker, openCategoryPicks, pickCategory,
   submitAnswer, startRapidFireTurn, fetchSequenceResults, type SequenceResult,
-  passQuestion, fetchPassedTeams, type PassedTeam, PASS_MARKS_CORRECT, declareWinner,
+  passQuestion, fetchPassedTeams, type PassedTeam, PASS_MARKS_CORRECT, declareWinner, resetWinner,
 } from '@/lib/liveEngine';
 import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
 import { questionTypeForRound } from '@/lib/questionSet';
@@ -39,6 +39,8 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const [buzzers, setBuzzers] = useState<BuzzerEvent[]>([]);
   const [scoreboard, setScoreboard] = useState<ScoreRow[]>([]);
   const [winnerPick, setWinnerPick] = useState<string | null>(null);
+  const [roundEliminationCount, setRoundEliminationCount] = useState(0);
+  const [eliminatePick, setEliminatePick] = useState<string | null>(null);
   const [recentScores, setRecentScores] = useState<ScoreLogRow[]>([]);
   const [timerNow, setTimerNow] = useState(Date.now());
   const [manualPoints, setManualPoints] = useState(10);
@@ -138,8 +140,15 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     if (s.current_round_id) {
       const items = await fetchPickItems(s.id, s.current_round_id);
       setPickItems(items);
+      // How many teams have already been eliminated FOR THIS ROUND — so the Round Complete banner
+      // can say "1 of 2 eliminated" instead of just a generic "eliminate a team" hint that's easy
+      // to miss (and easy to lose count of turn by turn, or to double-do on a later round).
+      const { count } = await supabase.from('eliminations').select('id', { count: 'exact', head: true })
+        .eq('session_id', s.id).eq('round_id', s.current_round_id).is('reversed_at', null);
+      setRoundEliminationCount(count || 0);
     } else {
       setPickItems([]);
+      setRoundEliminationCount(0);
     }
   }, [fetchSession, fetchRounds, fetchQuestion, fetchBuzzers, fetchScores]);
 
@@ -294,6 +303,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
       .on('postgres_changes', { event: '*', schema: 'public', table: 'buzzer_events', filter: `session_id=eq.${sessionId}` }, () => refreshAll())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'scores', filter: `session_id=eq.${sessionId}` }, () => refreshAll())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'answers', filter: `session_id=eq.${sessionId}` }, () => refreshAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'eliminations', filter: `session_id=eq.${sessionId}` }, () => refreshAll())
       .subscribe();
     return () => { supabase.removeChannel(sub); };
   }, [sessionId, refreshAll]);
@@ -425,6 +435,11 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     const teamName = scoreboard.find(t => t.team_id === teamId)?.name || 'this team';
     if (!confirm(`Declare "${teamName}" the winner? This switches the projector straight to the Winners screen.`)) return;
     await guard('declare-winner', () => declareWinner(sessionId, teamId), 'Failed to declare the winner.');
+  }
+
+  async function handleResetWinner() {
+    if (!confirm('Reset the declared winner? This takes the projector off the Winners screen.')) return;
+    await guard('reset-winner', () => resetWinner(sessionId), 'Failed to reset the winner.');
   }
 
   async function handleEliminate(teamId: string) {
@@ -567,7 +582,30 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
               <p className="text-2xl font-bold text-emerald-300 mb-1">✓ Round Complete</p>
               <p className="text-sm text-gray-300">Every question in &quot;{round?.name}&quot; has been shown and revealed.</p>
               {round?.elimination_enabled && (
-                <p className="text-xs text-amber-300 mt-3">Eliminate a team in the scoreboard below if this round calls for it, then start the next round from the list on the left.</p>
+                roundEliminationCount >= (round.elimination_count || 1) ? (
+                  <p className="text-sm text-emerald-300 mt-4 font-semibold">
+                    ✓ {roundEliminationCount} of {round.elimination_count} required elimination{round.elimination_count === 1 ? '' : 's'} done — start the next round from the list on the left.
+                  </p>
+                ) : (
+                  <div className="mt-4 bg-red-950/50 border-2 border-red-600/60 rounded-xl p-4 text-left">
+                    <p className="text-sm text-red-300 font-semibold mb-3 text-center">
+                      ⚠️ This round eliminates {round.elimination_count} team{round.elimination_count === 1 ? '' : 's'} — {roundEliminationCount} of {round.elimination_count} done so far.
+                    </p>
+                    <div className="flex items-center gap-2 justify-center">
+                      <select value={eliminatePick ?? ''} onChange={e => setEliminatePick(e.target.value || null)}
+                        className="bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200">
+                        <option value="">— choose team to eliminate —</option>
+                        {activeTeams.map(t => <option key={t.team_id} value={t.team_id}>{t.name}</option>)}
+                      </select>
+                      <button
+                        onClick={() => { if (eliminatePick && confirm(`Eliminate ${activeTeams.find(t => t.team_id === eliminatePick)?.name}?`)) { handleEliminate(eliminatePick); setEliminatePick(null); } }}
+                        disabled={!eliminatePick || isBusy(`elim:${eliminatePick}`)}
+                        className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed transition-all px-4 py-2 rounded-lg text-sm font-bold text-white shadow-md shrink-0">
+                        Eliminate
+                      </button>
+                    </div>
+                  </div>
+                )
               )}
             </div>
           ) : question ? (
@@ -915,9 +953,15 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
               different team (ties, judgement calls, etc.) before confirming. */}
           <div className="mt-4 pt-4 border-t border-gray-700">
             {session.winner_team_id ? (
-              <p className="text-sm text-emerald-400 font-semibold">
-                🏆 Winner declared: {scoreboard.find(t => t.team_id === session.winner_team_id)?.name || '—'}
-              </p>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm text-emerald-400 font-semibold">
+                  🏆 Winner declared: {scoreboard.find(t => t.team_id === session.winner_team_id)?.name || '—'}
+                </p>
+                <button onClick={handleResetWinner} disabled={isBusy('reset-winner')}
+                  className="bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all px-3 py-1.5 rounded-lg text-xs font-medium text-white shrink-0">
+                  Reset Winner
+                </button>
+              </div>
             ) : (
               <div className="flex items-center gap-2">
                 <select value={winnerPick ?? scoreboard.find(t => t.rank === 1 && !t.eliminated)?.team_id ?? ''}
