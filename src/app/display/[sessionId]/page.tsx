@@ -17,7 +17,7 @@ import { ConnectionBadge } from '@/components/ConnectionBadge';
 // answer key in the browser — visible in the network tab — while teams were still answering.
 type Question = { id: string; text: string; type: string; media_url: string | null; media_urls?: string[] | null };
 type Option = { option_key: string; option_text: string };
-type Round = { id: string; sequence_no: number; name: string; round_type: string; team_picks_category?: boolean; category_ids?: string[] | null };
+type Round = { id: string; sequence_no: number; name: string; round_type: string; buzzer_enabled?: boolean; team_picks_category?: boolean; category_ids?: string[] | null };
 
 export default function DisplayPage({ params }: { params: Promise<{ sessionId: string }> }) {
   const { sessionId } = use(params);
@@ -116,7 +116,7 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
     async function load() {
       setRound(null); setQuestion(null); setOptions([]); setSequenceItems([]); setCorrectSequence([]);
       if (sessionData?.current_round_id) {
-        const { data: r } = await supabase.from('rounds').select('id, sequence_no, name, round_type, team_picks_category, category_ids').eq('id', sessionData.current_round_id).single();
+        const { data: r } = await supabase.from('rounds').select('id, sequence_no, name, round_type, buzzer_enabled, team_picks_category, category_ids').eq('id', sessionData.current_round_id).single();
         setRound(r || null);
       }
       const itemId = sessionData?.current_question_set_item_id;
@@ -230,6 +230,11 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
     supabase.from('questions').select('answer').eq('id', question.id).single()
       .then(({ data }) => setRevealedAnswer(data?.answer ?? null));
   }, [showAnswer, question]);
+
+  // Matches the team console's rule exactly: the host's Open Buzzer button is gated on
+  // buzzer_enabled rather than round_type, so an MCQ round with the buzzer switched on is a
+  // buzzer round for every purpose the screens care about.
+  const isBuzzerRound = round?.round_type === 'BUZZER' || round?.round_type === 'PICTURE_BUZZER' || !!round?.buzzer_enabled;
 
   let remaining: number | null = null;
   const ts = sessionData?.timer_state;
@@ -397,7 +402,11 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
               </ol>
             </div>
           )}
-          {remaining !== null && round?.round_type !== 'BUZZER' && round?.round_type !== 'PICTURE_BUZZER' && (state === 'question' || state === 'buzzer_open') && (
+          {/* Buzzer rounds have no countdown — it's a race to buzz, not a race against a clock.
+              The test used to be on round_type alone, which missed an MCQ round with the buzzer
+              switched on (buzzer_enabled is what the host console actually gates the buzzer on),
+              so Round 4 showed a countdown the teams' own screens were already hiding. */}
+          {remaining !== null && !isBuzzerRound && (state === 'question' || state === 'buzzer_open') && (
             <div className="mt-10 flex justify-center">
               <div className={`inline-flex items-center justify-center rounded-full w-40 h-40 text-6xl font-mono font-bold border-4 shadow-xl ${remaining <= 5 ? 'border-red-400 text-red-300 bg-red-950/60 shadow-red-900/50 animate-pulse' : remaining <= 10 ? 'border-amber-400 text-amber-300 bg-amber-950/50 shadow-amber-900/40' : 'border-green-400 text-green-300 bg-green-950/40 shadow-green-900/30'}`}>
                 {remaining}s

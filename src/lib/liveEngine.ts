@@ -50,6 +50,21 @@ async function autoStartTimerState(sessionId: string, seconds: number | null | u
   return { duration: seconds, startedAt: (await dbNow(sessionId)).toISOString(), paused: false, remaining: null };
 }
 
+/** Timer state for a question about to go on screen, given the round it belongs to.
+ *
+ * A buzzer round gets no countdown: the buzz decides who answers, so a clock running down on the
+ * projector contradicts what the round is actually doing (the team consoles already hide it). The
+ * flag to test is `buzzer_enabled`, NOT round_type — the host console gates its Open Buzzer button
+ * on the flag, so an MCQ round with the buzzer switched on is a buzzer round in every way that
+ * matters. The host can still start a clock by hand from the console if a particular question
+ * needs one. */
+async function autoStartTimerStateForRound(sessionId: string, roundId: string | null | undefined) {
+  if (!roundId) return {};
+  const { data: round } = await supabase.from('rounds').select('timer_seconds, buzzer_enabled, round_type').eq('id', roundId).maybeSingle();
+  if (round?.buzzer_enabled || round?.round_type === 'BUZZER' || round?.round_type === 'PICTURE_BUZZER') return {};
+  return autoStartTimerState(sessionId, round?.timer_seconds);
+}
+
 // ---- round progression ----
 export async function startRound(sessionId: string, roundId: string) {
   const { data: round } = await supabase.from('rounds').select('team_picks_category').eq('id', roundId).single();
@@ -85,10 +100,9 @@ export async function nextQuestion(sessionId: string, roundId: string, currentIt
   }
   const idx = currentItemId ? items.findIndex(i => i.id === currentItemId) : -1;
   const next = items[idx + 1];
-  const { data: round } = await supabase.from('rounds').select('timer_seconds').eq('id', roundId).single();
   await supabase.from('live_sessions').update({
     current_question_set_item_id: next.id, display_state: 'question',
-    timer_state: await autoStartTimerState(sessionId, round?.timer_seconds),
+    timer_state: await autoStartTimerStateForRound(sessionId, roundId),
   }).eq('id', sessionId);
   await logEvent(sessionId, 'next_question', { itemId: next.id });
   return { done: false, itemId: next.id as string };
@@ -206,7 +220,7 @@ export async function pickCategory(sessionId: string, itemId: string, teamId: st
   if (item.picked_by_team_id) throw new Error('That slot has already been picked.');
 
   const { data: qset } = await supabase.from('question_sets').select('round_id').eq('id', item.question_set_id).single();
-  const { data: round } = qset ? await supabase.from('rounds').select('timer_seconds, round_type').eq('id', qset.round_id).single() : { data: null };
+  const { data: round } = qset ? await supabase.from('rounds').select('round_type').eq('id', qset.round_id).single() : { data: null };
 
   const { data: existing } = await supabase
     .from('question_set_items')
@@ -242,7 +256,7 @@ export async function pickCategory(sessionId: string, itemId: string, teamId: st
   if (!claimed || claimed.length === 0) throw new Error('That slot was just picked by someone else.');
   await supabase.from('live_sessions').update({
     current_question_set_item_id: itemId, display_state: 'question',
-    timer_state: await autoStartTimerState(sessionId, round?.timer_seconds),
+    timer_state: await autoStartTimerStateForRound(sessionId, qset?.round_id),
   }).eq('id', sessionId);
   await logEvent(sessionId, 'category_picked', { itemId, teamId, categoryId, questionId: chosen.id });
 }
@@ -582,9 +596,8 @@ export async function resetCurrentQuestion(sessionId: string, itemId: string) {
   // "completed in Ns" figure on a re-answered Sequencing question came out wrong or missing.
   const { data: item } = await supabase.from('question_set_items').select('question_set_id').eq('id', itemId).single();
   const { data: set } = item ? await supabase.from('question_sets').select('round_id').eq('id', item.question_set_id).maybeSingle() : { data: null };
-  const { data: round } = set?.round_id ? await supabase.from('rounds').select('timer_seconds').eq('id', set.round_id).maybeSingle() : { data: null };
   await supabase.from('live_sessions').update({
-    display_state: 'question', timer_state: await autoStartTimerState(sessionId, round?.timer_seconds),
+    display_state: 'question', timer_state: await autoStartTimerStateForRound(sessionId, set?.round_id),
   }).eq('id', sessionId);
   await logEvent(sessionId, 'question_reset', { itemId });
 }
