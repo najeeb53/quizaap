@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
 import { fetchPickItems, computeCurrentTierAsync, fetchSequenceResults, fetchWinner, type PickItem, type TierResult, type SequenceResult, type WinnerInfo } from '@/lib/liveEngine';
 import { questionTypeForRound } from '@/lib/questionSet';
-import { arabicClass, arabicDir } from '@/lib/textDir';
+import { arabicClass, arabicDir, containsArabic } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
 import { questionImages } from '@/lib/media';
 import { warmDbClock, dbNowMs } from '@/lib/serverClock';
@@ -271,20 +271,31 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
 
       {state === 'winners' && (
         winner ? (
-          <div className="relative rounded-3xl border-4 border-amber-400/70 bg-gradient-to-br from-amber-950/40 via-gray-950 to-amber-950/40 shadow-2xl shadow-amber-900/50 px-16 py-16 overflow-hidden">
-            <p className="text-2xl tracking-[0.3em] text-amber-300/80 uppercase mb-2">Winner</p>
-            <h1 className="text-7xl font-black bg-gradient-to-r from-amber-300 via-yellow-200 to-amber-300 bg-clip-text text-transparent mb-2">🏆</h1>
-            <h2 className={`text-6xl font-bold text-white mb-2 ${arabicClass(winner.team_name)}`}>{winner.team_name}</h2>
-            {winner.darajah && (
-              <p className={`text-3xl font-semibold text-amber-200/90 mb-10 ${arabicClass(winner.darajah)}`}>{winner.darajah}</p>
-            )}
-            {!winner.darajah && <div className="mb-10" />}
+          <div className="relative rounded-3xl border-4 border-amber-400/70 bg-gradient-to-br from-amber-950/40 via-gray-950 to-amber-950/40 shadow-2xl shadow-amber-900/50 px-10 py-12 overflow-hidden">
+            <p className="text-2xl tracking-[0.3em] text-amber-300/80 uppercase mb-3">Winner</p>
+            <p className="text-6xl mb-5 leading-none">🏆</p>
+            {/* Name and darajah share one centred line. `arabicClass` can't be used here: it adds
+                text-right, which is what pushed the Arabic team name off to the side instead of
+                centring it — so only the font is taken from the Arabic detection. */}
+            <h2 dir={arabicDir(winner.team_name)}
+              className={`flex flex-wrap items-baseline justify-center gap-x-8 gap-y-2 text-center mb-12 ${
+                containsArabic(`${winner.team_name} ${winner.darajah || ''}`) ? 'font-arabic' : ''}`}>
+              <span className="text-8xl font-bold text-white leading-tight drop-shadow-[0_0_25px_rgba(251,191,36,0.35)]">{winner.team_name}</span>
+              {winner.darajah && (
+                <>
+                  <span className="text-5xl text-amber-400/50 leading-tight" aria-hidden="true">•</span>
+                  <span className="text-6xl font-semibold text-amber-200 leading-tight">{winner.darajah}</span>
+                </>
+              )}
+            </h2>
             {winner.members.length > 0 ? (
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-8 max-w-4xl mx-auto">
+              // Fixed at two per row — four members read as a 2×2 block on the projector, and the
+              // photos stay large instead of shrinking to fit three across.
+              <div className="grid grid-cols-2 gap-x-20 gap-y-12 max-w-4xl mx-auto">
                 {winner.members.map((m, i) => (
-                  <div key={i} className="flex flex-col items-center gap-3">
-                    <img src={m.photo_url} alt={m.name} className="w-32 h-32 rounded-full object-cover border-4 border-amber-400 shadow-lg shadow-amber-900/50" />
-                    <p className={`text-xl font-semibold text-amber-100 ${arabicClass(m.name)}`}>{m.name}</p>
+                  <div key={i} className="flex flex-col items-center gap-4">
+                    <img src={m.photo_url} alt={m.name} className="w-48 h-48 rounded-full object-cover border-4 border-amber-400 shadow-lg shadow-amber-900/50" />
+                    <p className={`text-3xl font-semibold text-amber-100 text-center ${containsArabic(m.name) ? 'font-arabic' : ''}`}>{m.name}</p>
                   </div>
                 ))}
               </div>
