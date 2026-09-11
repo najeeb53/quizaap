@@ -12,6 +12,7 @@ type Team = {
   id: string;
   quiz_id: string;
   name: string;
+  darajah: string | null;
   code: string;
   logo_url: string | null;
   status: string;
@@ -24,10 +25,12 @@ export default function TeamsPage() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState('');
+  const [darajah, setDarajah] = useState('');
   const [saving, setSaving] = useState(false);
   const [lastCreated, setLastCreated] = useState<{ code: string; pin: string } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
+  const [editDarajah, setEditDarajah] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [resetId, setResetId] = useState<string | null>(null);
   const [newPin, setNewPin] = useState<string | null>(null);
@@ -41,6 +44,9 @@ export default function TeamsPage() {
   const deleteModalRef = useRef<HTMLDialogElement>(null);
   const resetModalRef = useRef<HTMLDialogElement>(null);
   const membersModalRef = useRef<HTMLDialogElement>(null);
+  const memberFileRef = useRef<HTMLInputElement>(null);
+
+  const membersTeam = teams.find(t => t.id === membersTeamId) || null;
 
   useEffect(() => {
     fetchTeams();
@@ -70,18 +76,21 @@ export default function TeamsPage() {
     const pin_hash = await hashPin(pin);
 
     const { error } = await supabase.from('teams').insert({
-      quiz_id: quizId, name: name.trim(), code, pin_hash, status: 'active',
+      quiz_id: quizId, name: name.trim(), darajah: darajah.trim() || null, code, pin_hash, status: 'active',
     });
     setSaving(false);
     if (error) { console.error(error); alert(`Could not add the team: ${error.message}`); return; }
     setLastCreated({ code, pin });
     setName('');
+    setDarajah('');
     fetchTeams();
   }
 
   async function handleRename(id: string) {
-    if (!editName.trim()) return;
-    await supabase.from('teams').update({ name: editName.trim() }).eq('id', id);
+    if (!editName.trim()) { setEditingId(null); return; }
+    const { error } = await supabase.from('teams')
+      .update({ name: editName.trim(), darajah: editDarajah.trim() || null }).eq('id', id);
+    if (error) { alert(`Could not save the team: ${error.message}`); return; }
     setEditingId(null);
     fetchTeams();
   }
@@ -136,6 +145,7 @@ export default function TeamsPage() {
     setMembersDraft(t.members || []);
     setNewMemberName('');
     setNewMemberFile(null);
+    if (memberFileRef.current) memberFileRef.current.value = '';
     membersModalRef.current?.showModal();
   }
 
@@ -148,6 +158,9 @@ export default function TeamsPage() {
     setMembersDraft(prev => [...prev, { name: newMemberName.trim(), photo_url: url }]);
     setNewMemberName('');
     setNewMemberFile(null);
+    // The file input keeps the old filename otherwise, so the next member looks like it already
+    // has a photo chosen when it doesn't.
+    if (memberFileRef.current) memberFileRef.current.value = '';
   }
 
   function handleRemoveMember(idx: number) {
@@ -171,9 +184,11 @@ export default function TeamsPage() {
         <h3 className="text-2xl font-bold text-gray-900 mb-4">Teams
           <span className="ml-3 text-lg font-normal text-gray-500">({teams.length})</span>
         </h3>
-        <form onSubmit={handleAdd} className="flex gap-3">
-          <input required placeholder="Team name" className="flex-1 px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
+        <form onSubmit={handleAdd} className="flex flex-wrap gap-3">
+          <input required placeholder="Team name — e.g. رغبة" className="flex-1 min-w-[14rem] px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
             value={name} onChange={e => setName(e.target.value)} />
+          <input placeholder="Darajah — e.g. الدرجة السادسة" className="flex-1 min-w-[14rem] px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
+            value={darajah} onChange={e => setDarajah(e.target.value)} />
           <button type="submit" disabled={saving}
             className="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 disabled:opacity-50 text-white px-6 py-3 rounded-lg text-sm font-semibold shadow-md hover:shadow-lg transition-all">
             {saving ? 'Adding…' : '+ Add Team'}
@@ -209,13 +224,26 @@ export default function TeamsPage() {
                 <tr key={t.id} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-blue-50 transition-colors`}>
                   <td className="px-6 py-4">
                     {editingId === t.id ? (
-                      <input autoFocus className="w-full px-3 py-2 border-2 border-blue-500 rounded-lg focus:outline-none text-gray-900" value={editName}
-                        onChange={e => setEditName(e.target.value)}
-                        onBlur={() => handleRename(t.id)}
-                        onKeyDown={e => e.key === 'Enter' && handleRename(t.id)} />
+                      <div className="flex flex-col gap-2">
+                        <input autoFocus className="w-full px-3 py-2 border-2 border-blue-500 rounded-lg focus:outline-none text-gray-900" value={editName}
+                          placeholder="Team name"
+                          onChange={e => setEditName(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') handleRename(t.id); if (e.key === 'Escape') setEditingId(null); }} />
+                        <input className="w-full px-3 py-2 border-2 border-blue-300 rounded-lg focus:outline-none focus:border-blue-500 text-gray-700 text-xs" value={editDarajah}
+                          placeholder="Darajah — e.g. الدرجة السادسة"
+                          onChange={e => setEditDarajah(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') handleRename(t.id); if (e.key === 'Escape') setEditingId(null); }} />
+                        <div className="flex gap-2">
+                          <button className="px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold" onClick={() => handleRename(t.id)}>Save</button>
+                          <button className="px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 text-xs font-semibold hover:bg-gray-50" onClick={() => setEditingId(null)}>Cancel</button>
+                        </div>
+                      </div>
                     ) : (
-                      <button className="font-semibold text-gray-900 hover:text-blue-600 text-left hover:underline"
-                        onClick={() => { setEditingId(t.id); setEditName(t.name); }}>{t.name}</button>
+                      <button className="text-left group"
+                        onClick={() => { setEditingId(t.id); setEditName(t.name); setEditDarajah(t.darajah || ''); }}>
+                        <span className="block font-semibold text-gray-900 group-hover:text-blue-600 group-hover:underline">{t.name}</span>
+                        <span className="block text-xs text-gray-500 group-hover:text-blue-500">{t.darajah || 'Add darajah…'}</span>
+                      </button>
                     )}
                   </td>
                   <td className="px-6 py-4 font-mono text-gray-700 bg-gray-100 px-3 py-2 rounded inline-block">{t.code}</td>
@@ -249,7 +277,10 @@ export default function TeamsPage() {
         </div>
       )}
 
-      <dialog ref={deleteModalRef} className="rounded-2xl shadow-2xl p-8 max-w-sm backdrop:bg-black/50">
+      {/* `m-auto` is what centres these. A native <dialog> centres itself with `margin: auto`, but
+          Tailwind's preflight resets every element's margin to 0, which left every dialog pinned to
+          the top-left corner of the screen. */}
+      <dialog ref={deleteModalRef} className="m-auto rounded-2xl shadow-2xl p-8 max-w-sm backdrop:bg-black/50">
         <h3 className="text-2xl font-bold text-gray-900 mb-3">Delete team?</h3>
         <p className="text-gray-700 text-sm mb-8">This removes their scores and history for this quiz. This cannot be undone.</p>
         <div className="flex justify-end gap-3">
@@ -258,7 +289,7 @@ export default function TeamsPage() {
         </div>
       </dialog>
 
-      <dialog ref={resetModalRef} className="rounded-2xl shadow-2xl p-8 max-w-sm backdrop:bg-black/50">
+      <dialog ref={resetModalRef} className="m-auto rounded-2xl shadow-2xl p-8 max-w-sm backdrop:bg-black/50">
         <h3 className="text-2xl font-bold text-gray-900 mb-4">Reset team PIN</h3>
         {newPin ? (
           <p className="text-sm text-gray-700 mb-8">New PIN: <b className="font-mono text-lg bg-blue-100 px-3 py-2 rounded text-blue-900 ml-1">{newPin}</b><br/><span className="text-xs text-gray-600 mt-2 block">Share it with the team now — it won&apos;t be shown again.</span></p>
@@ -275,31 +306,42 @@ export default function TeamsPage() {
         </div>
       </dialog>
 
-      <dialog ref={membersModalRef} className="rounded-2xl shadow-2xl p-8 max-w-lg w-full backdrop:bg-black/50">
-        <h3 className="text-2xl font-bold text-gray-900 mb-1">Team members</h3>
-        <p className="text-sm text-gray-500 mb-6">Name + photo for each member — shown on the Winners screen if this team is declared the winner.</p>
+      <dialog ref={membersModalRef} className="m-auto rounded-2xl shadow-2xl p-8 w-[min(44rem,92vw)] max-w-none max-h-[88vh] backdrop:bg-black/50">
+        <h3 className="text-2xl font-bold text-gray-900 mb-1">
+          Team members
+          {membersTeam && <span className="ml-2 text-lg font-semibold text-gray-500">— {membersTeam.name}</span>}
+        </h3>
+        <p className="text-sm text-gray-500 mb-6">
+          Name + photo for each member — shown on the Winners screen if this team is declared the winner.
+          {membersTeam?.darajah && <span className="block mt-1 text-gray-600">{membersTeam.darajah}</span>}
+        </p>
 
         {membersDraft.length > 0 && (
-          <ul className="flex flex-col gap-2 mb-5 max-h-64 overflow-y-auto">
+          <ul className="flex flex-col gap-2 mb-5 max-h-72 overflow-y-auto pr-1">
             {membersDraft.map((m, i) => (
               <li key={i} className="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
-                <img src={m.photo_url} alt={m.name} className="w-10 h-10 rounded-full object-cover border border-gray-300" />
-                <span className="flex-1 text-sm font-medium text-gray-900">{m.name}</span>
-                <button onClick={() => handleRemoveMember(i)} className="text-red-600 hover:text-red-800 text-xs font-semibold">Remove</button>
+                <img src={m.photo_url} alt={m.name} className="w-12 h-12 rounded-full object-cover border border-gray-300" />
+                <span className="flex-1 text-base font-medium text-gray-900">{m.name}</span>
+                <button onClick={() => handleRemoveMember(i)} className="text-red-600 hover:text-red-800 text-xs font-semibold px-2 py-1 rounded hover:bg-red-50">Remove</button>
               </li>
             ))}
           </ul>
         )}
 
-        <div className="flex items-center gap-2 mb-6 bg-blue-50 border border-blue-100 rounded-xl p-3">
-          <input placeholder="Member name" value={newMemberName} onChange={e => setNewMemberName(e.target.value)}
-            className="flex-1 px-3 py-2 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-sm text-gray-900 placeholder-gray-500" />
-          <input type="file" accept="image/*" onChange={e => setNewMemberFile(e.target.files?.[0] || null)}
-            className="text-xs text-gray-600 file:mr-2 file:px-3 file:py-1.5 file:rounded-md file:border-0 file:bg-blue-100 file:text-blue-700 file:text-xs file:font-semibold" />
-          <button onClick={handleAddMember} disabled={savingMember || !newMemberName.trim() || !newMemberFile}
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-sm transition-colors shrink-0">
-            {savingMember ? 'Adding…' : '+ Add'}
-          </button>
+        <div className="mb-6 bg-blue-50 border border-blue-100 rounded-xl p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-800 mb-3">Add a member</p>
+          <div className="flex flex-col gap-3">
+            <input placeholder="Member name" value={newMemberName} onChange={e => setNewMemberName(e.target.value)}
+              className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-base text-gray-900 placeholder-gray-500 bg-white" />
+            <div className="flex flex-wrap items-center gap-3">
+              <input ref={memberFileRef} type="file" accept="image/*" onChange={e => setNewMemberFile(e.target.files?.[0] || null)}
+                className="flex-1 min-w-[16rem] text-sm text-gray-600 file:mr-3 file:px-4 file:py-2 file:rounded-lg file:border-0 file:bg-blue-600 file:text-white file:text-sm file:font-semibold hover:file:bg-blue-700 file:cursor-pointer" />
+              <button onClick={handleAddMember} disabled={savingMember || !newMemberName.trim() || !newMemberFile}
+                className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-6 py-3 rounded-lg text-sm font-semibold shadow-sm transition-colors shrink-0">
+                {savingMember ? 'Adding…' : '+ Add Member'}
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="flex justify-end gap-3">

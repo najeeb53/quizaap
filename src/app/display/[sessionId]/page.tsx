@@ -274,7 +274,11 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
           <div className="relative rounded-3xl border-4 border-amber-400/70 bg-gradient-to-br from-amber-950/40 via-gray-950 to-amber-950/40 shadow-2xl shadow-amber-900/50 px-16 py-16 overflow-hidden">
             <p className="text-2xl tracking-[0.3em] text-amber-300/80 uppercase mb-2">Winner</p>
             <h1 className="text-7xl font-black bg-gradient-to-r from-amber-300 via-yellow-200 to-amber-300 bg-clip-text text-transparent mb-2">🏆</h1>
-            <h2 className={`text-6xl font-bold text-white mb-10 ${arabicClass(winner.team_name)}`}>{winner.team_name}</h2>
+            <h2 className={`text-6xl font-bold text-white mb-2 ${arabicClass(winner.team_name)}`}>{winner.team_name}</h2>
+            {winner.darajah && (
+              <p className={`text-3xl font-semibold text-amber-200/90 mb-10 ${arabicClass(winner.darajah)}`}>{winner.darajah}</p>
+            )}
+            {!winner.darajah && <div className="mb-10" />}
             {winner.members.length > 0 ? (
               <div className="grid grid-cols-2 md:grid-cols-3 gap-8 max-w-4xl mx-auto">
                 {winner.members.map((m, i) => (

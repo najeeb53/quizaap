@@ -655,7 +655,7 @@ export async function resetSession(sessionId: string) {
 
 // ---- winner ----
 export type TeamMember = { name: string; photo_url: string };
-export type WinnerInfo = { team_id: string; team_name: string; logo_url: string | null; members: TeamMember[] };
+export type WinnerInfo = { team_id: string; team_name: string; darajah: string | null; logo_url: string | null; members: TeamMember[] };
 
 /** Declares a team the session's winner and moves the display straight to the Winners screen —
  * one action for the host, rather than a separate "pick winner" step and a separate "show
@@ -683,7 +683,7 @@ export async function resetWinner(sessionId: string) {
  * a team/display screen loading before the host has clicked Declare Winner). */
 export async function fetchWinner(winnerTeamId: string | null | undefined): Promise<WinnerInfo | null> {
   if (!winnerTeamId) return null;
-  const { data } = await supabase.from('teams').select('id, name, logo_url, members').eq('id', winnerTeamId).maybeSingle();
+  const { data } = await supabase.from('teams').select('id, name, darajah, logo_url, members').eq('id', winnerTeamId).maybeSingle();
   if (!data) return null;
-  return { team_id: data.id, team_name: data.name, logo_url: data.logo_url, members: (data.members as TeamMember[]) || [] };
+  return { team_id: data.id, team_name: data.name, darajah: data.darajah ?? null, logo_url: data.logo_url, members: (data.members as TeamMember[]) || [] };
 }
