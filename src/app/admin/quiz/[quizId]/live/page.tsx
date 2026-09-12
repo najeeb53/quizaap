@@ -71,6 +71,12 @@ export default function LivePage() {
       quiz_id: quizId, status: 'not_started', display_state: 'idle',
     }).select().single();
     if (error) { console.error(error); return; }
+    // A new show starts with every team in it. Eliminations are recorded per session, but the
+    // team's own eliminated_at flag is not — so without this, teams knocked out of the previous
+    // session stay knocked out here: absent from the scoring console and the picking rotation,
+    // and locked out of their own consoles, with nothing on screen explaining why.
+    await supabase.from('teams').update({ eliminated_at: null })
+      .eq('quiz_id', quizId).not('eliminated_at', 'is', null);
     setSession(data);
     fetchAll();
   }

@@ -685,6 +685,16 @@ export async function resetScores(sessionId: string) {
  * meant a rehearsal's answers were still sitting in the table, so the first Reveal of the real
  * show graded and awarded points for answers submitted the day before. Scores are left alone —
  * "Reset Scores" is its own button — so run both for a true clean slate. */
+/** Clears the per-team elimination flag for every team in this session's quiz, so a fresh run
+ * starts with the full field. The `eliminations` rows are left alone — they belong to the session
+ * that recorded them and are the audit trail of what happened in it. */
+export async function clearEliminationFlags(sessionId: string) {
+  const { data: sess } = await supabase.from('live_sessions').select('quiz_id').eq('id', sessionId).maybeSingle();
+  if (!sess?.quiz_id) return;
+  await supabase.from('teams').update({ eliminated_at: null })
+    .eq('quiz_id', sess.quiz_id).not('eliminated_at', 'is', null);
+}
+
 export async function resetSession(sessionId: string) {
   const [answers, buzzes] = await Promise.all([
     supabase.from('answers').delete().eq('session_id', sessionId),
@@ -699,6 +709,13 @@ export async function resetSession(sessionId: string) {
       .update({ picked_by_team_id: null, picked_at: null })
       .in('question_set_id', setIds);
   }
+
+  // Put every team back in the game. `eliminations` rows are per session, but `teams.eliminated_at`
+  // is a single flag on the team itself — so a team knocked out in one show stayed knocked out in
+  // the next one: missing from the scoring console and the picking rotation, greyed out on the
+  // results page, and locked out of its own console, while the Eliminations panel (which reads the
+  // new session's rows) truthfully reported "No eliminations."
+  await clearEliminationFlags(sessionId);
 
   const { error } = await supabase.from('live_sessions').update({
     status: 'not_started', current_round_id: null, current_question_set_item_id: null,
