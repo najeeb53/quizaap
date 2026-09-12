@@ -66,17 +66,31 @@ async function autoStartTimerStateForRound(sessionId: string, roundId: string | 
 }
 
 // ---- round progression ----
-/** The team in seat 1 — the admin's chosen starting team — among those still in the game.
+/** Every team still in the game, in the seating order the admin fixed before the show.
  * A team with no seat assigned sorts last, so it can never accidentally become the starter. */
-export async function firstSeatedTeam(sessionId: string): Promise<string | null> {
+async function seatedTeamIds(sessionId: string): Promise<string[]> {
   const { data: sess } = await supabase.from('live_sessions').select('quiz_id').eq('id', sessionId).maybeSingle();
-  if (!sess?.quiz_id) return null;
+  if (!sess?.quiz_id) return [];
   const { data: teams } = await supabase.from('teams')
     .select('id, turn_order, name')
     .eq('quiz_id', sess.quiz_id).eq('status', 'active').is('eliminated_at', null)
     .order('turn_order', { ascending: true, nullsFirst: false })
     .order('name');
-  return teams?.[0]?.id ?? null;
+  return (teams || []).map(t => t.id as string);
+}
+
+/** The team in seat 1 — the admin's chosen starting team. */
+export async function firstSeatedTeam(sessionId: string): Promise<string | null> {
+  return (await seatedTeamIds(sessionId))[0] ?? null;
+}
+
+/** The team seated after `afterTeamId`, wrapping back to seat 1 past the last one. Eliminated
+ * teams are already excluded, so the rotation closes over them. */
+export async function nextSeatedTeam(sessionId: string, afterTeamId: string | null): Promise<string | null> {
+  const ids = await seatedTeamIds(sessionId);
+  if (ids.length === 0) return null;
+  const idx = afterTeamId ? ids.indexOf(afterTeamId) : -1;
+  return ids[(idx + 1) % ids.length];
 }
 
 export async function startRound(sessionId: string, roundId: string) {
@@ -271,11 +285,22 @@ export async function pickCategory(sessionId: string, itemId: string, teamId: st
   }).eq('id', itemId).is('picked_by_team_id', null).select('id');
   if (claimError) throw claimError;
   if (!claimed || claimed.length === 0) throw new Error('That slot was just picked by someone else.');
+  // The turn moves on AS PART OF the pick, not as a separate thing the host has to remember.
+  //
+  // This is what was missing when the picker started being pre-selected at round start: the
+  // category buttons became live from the moment a round opened, but nothing advanced the turn
+  // afterwards, so every subsequent pick was silently attributed to whichever team the console had
+  // been left pointing at — and since the answering team in a picking round is taken from
+  // picked_by_team_id, that team collected every question's marks. The turn has to advance itself
+  // for the same reason the buttons used to be disabled: the host is looking at the hall, not the
+  // screen. The host can still override with the dropdown.
+  const nextPicker = await nextSeatedTeam(sessionId, teamId);
   await supabase.from('live_sessions').update({
     current_question_set_item_id: itemId, display_state: 'question',
+    current_picker_team_id: nextPicker,
     timer_state: await autoStartTimerStateForRound(sessionId, qset?.round_id),
   }).eq('id', sessionId);
-  await logEvent(sessionId, 'category_picked', { itemId, teamId, categoryId, questionId: chosen.id });
+  await logEvent(sessionId, 'category_picked', { itemId, teamId, categoryId, questionId: chosen.id, nextPicker });
 }
 
 // ---- timer (server-authoritative-ish: we store startedAt + duration, all clients compute remaining) ----

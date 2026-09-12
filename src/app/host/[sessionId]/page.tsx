@@ -54,7 +54,12 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const [eliminatePick, setEliminatePick] = useState<string | null>(null);
   const [recentScores, setRecentScores] = useState<ScoreLogRow[]>([]);
   const [timerNow, setTimerNow] = useState(Date.now());
-  const [manualPoints, setManualPoints] = useState(10);
+  // Award and deduction are separate amounts, not one number used with both signs: the house rule
+  // is +10 for a correct answer but only -5 for a wrong one, and a single field forced the host to
+  // retype the number between the two — easy to get wrong live, and every mistake is a score row
+  // someone has to notice and undo.
+  const [manualAward, setManualAward] = useState(10);
+  const [manualDeduct, setManualDeduct] = useState(5);
   const [manualReason, setManualReason] = useState('');
   const [pickItems, setPickItems] = useState<PickItem[]>([]);
   const [tier, setTier] = useState<TierResult>({ difficulty: null, categories: [], nextItemId: null, done: true });
@@ -887,7 +892,25 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 <p className="text-gray-400 text-sm">All categories in this round have been picked.</p>
               ) : (
                 <>
-                  <p className="text-xs text-gray-400 mb-2">Difficulty: <b className="text-gray-200">{tier.difficulty}</b> — {pickerTeam ? `${pickerTeam.name}'s turn` : 'select a team above'}</p>
+                  {/* Whose pick this is decides who gets the marks, so it is stated once, large,
+                      directly above the buttons that act on it — not in grey 12px alongside the
+                      difficulty. A host watching the hall rather than the screen has to be able to
+                      catch a wrong team at a glance. */}
+                  <div className={`mb-3 flex items-center justify-between gap-4 rounded-xl border-2 px-4 py-3 ${
+                    pickerTeam ? 'border-emerald-500/50 bg-emerald-950/40' : 'border-amber-500/60 bg-amber-950/40'
+                  }`}>
+                    <div className="min-w-0">
+                      <p className="text-[10px] uppercase tracking-[0.15em] text-gray-400 mb-0.5">
+                        Picking now — this team scores this question
+                      </p>
+                      <p className={`text-2xl font-bold truncate ${pickerTeam ? 'text-emerald-300' : 'text-amber-300'} ${arabicClass(pickerTeam?.name || '')}`}>
+                        {pickerTeam ? pickerTeam.name : 'No team selected'}
+                      </p>
+                    </div>
+                    <span className="shrink-0 rounded-lg bg-black/40 border border-gray-700 px-3 py-1.5 text-xs font-semibold text-gray-300">
+                      {tier.difficulty}
+                    </span>
+                  </div>
                   <div className="grid grid-cols-3 gap-2">
                     {tier.categories.map(c => (
                       <button key={c.category_id} onClick={() => handlePick(c.category_id)} disabled={!session.current_picker_team_id}
@@ -1007,9 +1030,24 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
         {/* Scoring console */}
         <div className="bg-gray-800/60 backdrop-blur border border-gray-700 rounded-2xl shadow-xl p-4">
           <h3 className="text-lg font-bold text-white mb-3">Scoring Console</h3>
-          <div className="flex gap-2 mb-3">
-            <input type="number" value={manualPoints} onChange={e => setManualPoints(Number(e.target.value))} className="w-20 bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200" />
-            <input placeholder="Reason (optional)" value={manualReason} onChange={e => setManualReason(e.target.value)} className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200" />
+          <div className="flex flex-wrap items-end gap-2 mb-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wider text-emerald-400 font-semibold">Award</span>
+              <input id="manual-award" type="number" min="0" value={manualAward}
+                onChange={e => setManualAward(Math.abs(Number(e.target.value)) || 0)}
+                className="w-20 bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200" />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wider text-red-400 font-semibold">Deduct</span>
+              <input id="manual-deduct" type="number" min="0" value={manualDeduct}
+                onChange={e => setManualDeduct(Math.abs(Number(e.target.value)) || 0)}
+                className="w-20 bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200" />
+            </label>
+            <label className="flex flex-col gap-1 flex-1 min-w-[10rem]">
+              <span className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Reason</span>
+              <input id="manual-reason" placeholder="Optional" value={manualReason} onChange={e => setManualReason(e.target.value)}
+                className="w-full bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200" />
+            </label>
           </div>
           <ul className="flex flex-col gap-1.5 mb-4">
             {activeTeams.map(t => (
@@ -1019,8 +1057,8 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                   <span className="rounded-full px-2 py-0.5 text-xs font-semibold bg-gray-900 text-gray-300">{t.total} pts</span>
                 </span>
                 <span className="flex gap-3">
-                  <button onClick={() => handleAward(t.team_id, manualPoints, manualReason || 'Manual award')} disabled={isBusy(`award:${t.team_id}`)} className="text-emerald-400 hover:text-emerald-300 font-semibold hover:underline disabled:opacity-40 disabled:cursor-not-allowed transition-all">+{manualPoints}</button>
-                  <button onClick={() => handleAward(t.team_id, -manualPoints, manualReason || 'Manual deduction')} disabled={isBusy(`award:${t.team_id}`)} className="text-red-400 hover:text-red-300 font-semibold hover:underline disabled:opacity-40 disabled:cursor-not-allowed transition-all">-{manualPoints}</button>
+                  <button onClick={() => handleAward(t.team_id, manualAward, manualReason || 'Manual award')} disabled={isBusy(`award:${t.team_id}`)} className="text-emerald-400 hover:text-emerald-300 font-semibold hover:underline disabled:opacity-40 disabled:cursor-not-allowed transition-all">+{manualAward}</button>
+                  <button onClick={() => handleAward(t.team_id, -manualDeduct, manualReason || 'Manual deduction')} disabled={isBusy(`award:${t.team_id}`)} className="text-red-400 hover:text-red-300 font-semibold hover:underline disabled:opacity-40 disabled:cursor-not-allowed transition-all">-{manualDeduct}</button>
                   {round?.elimination_enabled && <button onClick={() => { if (confirm(`Eliminate ${t.name}?`)) handleEliminate(t.team_id); }} disabled={isBusy(`elim:${t.team_id}`)} className="text-orange-400 hover:text-orange-300 font-semibold hover:underline disabled:opacity-40 disabled:cursor-not-allowed transition-all">Eliminate</button>}
                 </span>
               </li>
