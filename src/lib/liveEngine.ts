@@ -66,15 +66,32 @@ async function autoStartTimerStateForRound(sessionId: string, roundId: string | 
 }
 
 // ---- round progression ----
+/** The team in seat 1 — the admin's chosen starting team — among those still in the game.
+ * A team with no seat assigned sorts last, so it can never accidentally become the starter. */
+export async function firstSeatedTeam(sessionId: string): Promise<string | null> {
+  const { data: sess } = await supabase.from('live_sessions').select('quiz_id').eq('id', sessionId).maybeSingle();
+  if (!sess?.quiz_id) return null;
+  const { data: teams } = await supabase.from('teams')
+    .select('id, turn_order, name')
+    .eq('quiz_id', sess.quiz_id).eq('status', 'active').is('eliminated_at', null)
+    .order('turn_order', { ascending: true, nullsFirst: false })
+    .order('name');
+  return teams?.[0]?.id ?? null;
+}
+
 export async function startRound(sessionId: string, roundId: string) {
   const { data: round } = await supabase.from('rounds').select('team_picks_category').eq('id', roundId).single();
+  // A picking round opens on the starting team the admin seated, instead of "— choose team —":
+  // one less thing for the host to set by hand with the hall watching, and it makes the seating
+  // order actually govern who goes first rather than being merely advisory.
+  const firstPicker = round?.team_picks_category ? await firstSeatedTeam(sessionId) : null;
   // Team-picks-category rounds go straight to team picking — Team/Display only show that
   // screen once display_state is 'category_pick', so without this they'd sit on the round
   // intro screen until the host separately clicked "Open Category Picks."
   await supabase.from('live_sessions').update({
     current_round_id: roundId, current_question_set_item_id: null,
     display_state: round?.team_picks_category ? 'category_pick' : 'round_intro',
-    current_picker_team_id: null, timer_state: {},
+    current_picker_team_id: firstPicker, timer_state: {},
     status: 'live', started_at: new Date().toISOString(),
   }).eq('id', sessionId);
   await logEvent(sessionId, 'round_started', { roundId });

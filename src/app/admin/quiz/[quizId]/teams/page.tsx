@@ -13,6 +13,7 @@ type Team = {
   quiz_id: string;
   name: string;
   darajah: string | null;
+  turn_order: number | null;
   code: string;
   logo_url: string | null;
   status: string;
@@ -40,6 +41,7 @@ export default function TeamsPage() {
   const [newMemberFile, setNewMemberFile] = useState<File | null>(null);
   const [savingMember, setSavingMember] = useState(false);
   const [savingMembers, setSavingMembers] = useState(false);
+  const [reordering, setReordering] = useState(false);
 
   const deleteModalRef = useRef<HTMLDialogElement>(null);
   const resetModalRef = useRef<HTMLDialogElement>(null);
@@ -54,7 +56,10 @@ export default function TeamsPage() {
 
   async function fetchTeams() {
     setLoading(true);
-    const { data, error } = await supabase.from('teams').select('*').eq('quiz_id', quizId).order('name');
+    // Seating order, not alphabetical: this list IS the running order, so it has to read the way
+    // the teams are actually sitting. A team with no seat yet falls to the bottom.
+    const { data, error } = await supabase.from('teams').select('*').eq('quiz_id', quizId)
+      .order('turn_order', { ascending: true, nullsFirst: false }).order('name');
     if (error) console.error(error);
     setTeams(data || []);
     setLoading(false);
@@ -75,14 +80,43 @@ export default function TeamsPage() {
     const pin = randomPin();
     const pin_hash = await hashPin(pin);
 
+    // New teams take the next free seat at the end of the running order, so the list never has a
+    // gap or a duplicate seat number and the admin only reorders when they want to.
+    const nextSeat = teams.reduce((max, t) => Math.max(max, t.turn_order || 0), 0) + 1;
     const { error } = await supabase.from('teams').insert({
-      quiz_id: quizId, name: name.trim(), darajah: darajah.trim() || null, code, pin_hash, status: 'active',
+      quiz_id: quizId, name: name.trim(), darajah: darajah.trim() || null, turn_order: nextSeat,
+      code, pin_hash, status: 'active',
     });
     setSaving(false);
     if (error) { console.error(error); alert(`Could not add the team: ${error.message}`); return; }
     setLastCreated({ code, pin });
     setName('');
     setDarajah('');
+    fetchTeams();
+  }
+
+  /** Moves a team one seat up or down the running order.
+   *
+   * Rather than swapping the two teams' stored numbers — which preserves whatever gaps and
+   * duplicates the data already had — this renumbers the whole list 1..n from the reordered array.
+   * That keeps the seat numbers meaning exactly what they show, even for teams imported or created
+   * before seating existed. Writes are sent as one batch and the list only refreshes once they all
+   * land, so a half-applied reorder never flickers on screen.
+   */
+  async function moveTeam(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= teams.length) return;
+    const reordered = [...teams];
+    [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+
+    setReordering(true);
+    setTeams(reordered.map((t, i) => ({ ...t, turn_order: i + 1 }))); // optimistic
+    const results = await Promise.all(
+      reordered.map((t, i) => supabase.from('teams').update({ turn_order: i + 1 }).eq('id', t.id))
+    );
+    setReordering(false);
+    const failed = results.find(r => r.error);
+    if (failed?.error) { alert(`Could not save the new order: ${failed.error.message}`); }
     fetchTeams();
   }
 
@@ -181,9 +215,14 @@ export default function TeamsPage() {
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-lg">
       <div className="px-8 py-6 border-b border-gray-200">
-        <h3 className="text-2xl font-bold text-gray-900 mb-4">Teams
+        <h3 className="text-2xl font-bold text-gray-900 mb-1">Teams
           <span className="ml-3 text-lg font-normal text-gray-500">({teams.length})</span>
         </h3>
+        <p className="text-sm text-gray-500 mb-4">
+          The seat order is the running order: seat 1 starts every picking round, then 2, 3… and the
+          host&apos;s <b>Next Team</b> button follows it, skipping eliminated teams. Use ▲▼ to arrange the
+          teams the way they&apos;re sitting.
+        </p>
         <form onSubmit={handleAdd} className="flex flex-wrap gap-3">
           <input required placeholder="Team name — e.g. رغبة" className="flex-1 min-w-[14rem] px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none text-gray-900 placeholder-gray-500"
             value={name} onChange={e => setName(e.target.value)} />
@@ -211,6 +250,7 @@ export default function TeamsPage() {
           <table className="w-full text-left text-sm">
             <thead className="bg-gradient-to-r from-gray-900 to-gray-800 border-b text-white text-xs font-semibold tracking-wider">
               <tr>
+                <th className="px-4 py-4 w-32">Seat</th>
                 <th className="px-6 py-4">Team Name</th>
                 <th className="px-6 py-4">Access Code</th>
                 <th className="px-6 py-4">Team Console</th>
@@ -222,6 +262,20 @@ export default function TeamsPage() {
             <tbody className="divide-y divide-gray-200">
               {teams.map((t, idx) => (
                 <tr key={t.id} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-blue-50 transition-colors`}>
+                  <td className="px-4 py-4">
+                    <div className="flex items-center gap-2">
+                      <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-sm font-bold ${
+                        idx === 0 ? 'bg-amber-100 text-amber-800 ring-2 ring-amber-400' : 'bg-gray-200 text-gray-700'
+                      }`}>{idx + 1}</span>
+                      <div className="flex flex-col gap-0.5">
+                        <button onClick={() => moveTeam(idx, -1)} disabled={idx === 0 || reordering} aria-label="Move up"
+                          className="px-1.5 leading-none text-xs text-gray-600 hover:text-blue-700 disabled:opacity-25 disabled:cursor-not-allowed">▲</button>
+                        <button onClick={() => moveTeam(idx, 1)} disabled={idx === teams.length - 1 || reordering} aria-label="Move down"
+                          className="px-1.5 leading-none text-xs text-gray-600 hover:text-blue-700 disabled:opacity-25 disabled:cursor-not-allowed">▼</button>
+                      </div>
+                    </div>
+                    {idx === 0 && <span className="block mt-1 text-[10px] font-semibold uppercase tracking-wide text-amber-700">Starts</span>}
+                  </td>
                   <td className="px-6 py-4">
                     {editingId === t.id ? (
                       <div className="flex flex-col gap-2">

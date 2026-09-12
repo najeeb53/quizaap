@@ -1,6 +1,15 @@
 import { supabase } from './supabaseClient';
 
-export type ScoreRow = { team_id: string; name: string; total: number; eliminated: boolean; rank: number };
+export type ScoreRow = { team_id: string; name: string; total: number; eliminated: boolean; rank: number; turn_order: number | null };
+
+/** Seating order, as the admin fixed it before the show: seat 1 first, then 2, 3… A team with no
+ * seat yet sorts to the end rather than to the front, so an unseated team can never silently
+ * become the one that starts. Ties (or two teams left unseated) fall back to name for stability. */
+export function bySeat(a: ScoreRow, b: ScoreRow): number {
+  const ao = a.turn_order ?? Number.MAX_SAFE_INTEGER;
+  const bo = b.turn_order ?? Number.MAX_SAFE_INTEGER;
+  return ao - bo || a.name.localeCompare(b.name);
+}
 
 /** Fetches every scores row for a session, paging past Supabase/PostgREST's default 1000-row
  * cap — a session that has accumulated more than 1000 score entries (heavy testing, a long
@@ -26,7 +35,7 @@ async function fetchAllScores(sessionId: string): Promise<{ team_id: string; poi
 
 export async function fetchScoreboard(quizId: string, sessionId: string): Promise<ScoreRow[]> {
   const [{ data: teams }, scores] = await Promise.all([
-    supabase.from('teams').select('id, name, eliminated_at').eq('quiz_id', quizId),
+    supabase.from('teams').select('id, name, eliminated_at, turn_order').eq('quiz_id', quizId),
     fetchAllScores(sessionId),
   ]);
   const totals: Record<string, number> = {};
@@ -34,6 +43,7 @@ export async function fetchScoreboard(quizId: string, sessionId: string): Promis
 
   const rows = (teams || []).map(t => ({
     team_id: t.id, name: t.name, total: totals[t.id] || 0, eliminated: !!t.eliminated_at, rank: 0,
+    turn_order: t.turn_order ?? null,
   }));
   // Tied teams share a rank. Previously three teams on 40 points rendered as #1/#2/#3 in
   // whatever order the teams table happened to return — so the projector declared a leader

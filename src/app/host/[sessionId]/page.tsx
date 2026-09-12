@@ -12,7 +12,7 @@ import {
   submitAnswer, startRapidFireTurn, fetchSequenceResults, type SequenceResult,
   passQuestion, fetchPassedTeams, type PassedTeam, PASS_MARKS_CORRECT, declareWinner, resetWinner,
 } from '@/lib/liveEngine';
-import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
+import { fetchScoreboard, bySeat, type ScoreRow } from '@/lib/scoreboard';
 import { questionTypeForRound } from '@/lib/questionSet';
 import { arabicClass, arabicDir } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
@@ -283,9 +283,9 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
       const updatedPassed = [...passedTeams, { team_id: passingTeamId, team_name: activeTeams.find(t => t.team_id === passingTeamId)?.name || 'Unknown team' }];
       setPassedTeams(updatedPassed);
       const passedIds = new Set(updatedPassed.map(p => p.team_id));
-      // Same alphabetical order used for the category-pick "Next Team" rotation, so who's "next"
-      // is predictable rather than arbitrary.
-      const next = [...activeTeams].sort((a, b) => a.name.localeCompare(b.name)).find(t => !passedIds.has(t.team_id));
+      // A passed question goes round the table in the same seating order as everything else, so
+      // "next" means the team physically next along rather than an alphabetical accident.
+      const next = seatedTeams.find(t => !passedIds.has(t.team_id));
       if (next) {
         setPassOverrideTeamId(next.team_id);
         setAnswerTeamId(next.team_id);
@@ -452,6 +452,17 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     if (!ok) setSession(s => (s ? { ...s, current_picker_team_id: prev } : s));
   }
 
+  /** Rapid Fire's own "next team": same seating rotation, but routed through the rapid-fire
+   * selector so this turn's correct/wrong/pass counters and the timer are reset with it. Using the
+   * plain picker advance here would move the turn on while leaving the previous team's tallies
+   * (and their exhausted allowance) on screen. */
+  async function handleNextRapidFireTeam() {
+    if (seatedTeams.length === 0) return;
+    const currentIdx = seatedTeams.findIndex(t => t.team_id === session?.current_picker_team_id);
+    const next = seatedTeams[(currentIdx + 1) % seatedTeams.length];
+    await handleRapidFireSelectTeam(next.team_id);
+  }
+
   async function handleRapidFireStop() {
     setRapidLocked(true); // lock the buttons immediately, don't wait for the DB round-trip
     await pauseTimer(sessionId, 0);
@@ -528,11 +539,14 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     await guard(`elim:${teamId}`, () => eliminateTeam(sessionId, teamId, session?.current_round_id || null, `Eliminated after ${round?.name || 'round'}`), 'Failed to eliminate that team.');
   }
 
+  /** Advances to the next team in the SEATING order the admin fixed before the show, wrapping back
+   * to seat 1 after the last one. Eliminated teams are already out of seatedTeams, so the rotation
+   * closes over them automatically. This used to walk the teams alphabetically by name, which
+   * bears no relation to where anyone is actually sitting. */
   async function handleNextTeamPicker() {
-    if (activeTeams.length === 0) return;
-    const sortedTeams = [...activeTeams].sort((a, b) => a.name.localeCompare(b.name));
-    const currentIdx = sortedTeams.findIndex(t => t.team_id === session?.current_picker_team_id);
-    const next = sortedTeams[(currentIdx + 1) % sortedTeams.length];
+    if (seatedTeams.length === 0) return;
+    const currentIdx = seatedTeams.findIndex(t => t.team_id === session?.current_picker_team_id);
+    const next = seatedTeams[(currentIdx + 1) % seatedTeams.length];
     await handleSetPicker(next.team_id);
   }
 
@@ -560,7 +574,11 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const remaining = timerRemaining();
   const rapidFireActive = remaining !== null && remaining > 0 && !rapidLocked;
   const activeTeams = scoreboard.filter(t => !t.eliminated);
+  // The scoreboard is sorted by points — right for the standings, wrong for "whose turn is it".
+  // Anything that hands the turn to a team goes through this instead: the admin's seating order.
+  const seatedTeams = [...activeTeams].sort(bySeat);
   const pickerTeam = activeTeams.find(t => t.team_id === session?.current_picker_team_id);
+  const seatLabel = (t: ScoreRow) => (t.turn_order ? `${t.turn_order}. ${t.name}` : t.name);
 
   if (!session) return <p className="text-gray-400">Loading session…</p>;
 
@@ -623,8 +641,10 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 <select value={session.current_picker_team_id || ''} onChange={e => handleRapidFireSelectTeam(e.target.value || null)}
                   className="bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200">
                   <option value="">— choose team —</option>
-                  {activeTeams.map(t => <option key={t.team_id} value={t.team_id}>{t.name}</option>)}
+                  {seatedTeams.map(t => <option key={t.team_id} value={t.team_id}>{seatLabel(t)}</option>)}
                 </select>
+                <button onClick={handleNextRapidFireTeam} disabled={seatedTeams.length === 0}
+                  className="bg-gray-700 hover:bg-gray-600 disabled:opacity-40 transition-all px-3 py-1.5 rounded-lg text-sm font-medium text-gray-200">Next Team ▶</button>
               </div>
               <div className="flex items-center gap-3 mb-3">
                 <button onClick={() => { setRapidLocked(false); startTimer(sessionId, round.timer_seconds || 60); }} disabled={!session.current_picker_team_id}
@@ -859,7 +879,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 <select value={session.current_picker_team_id || ''} onChange={e => handleSetPicker(e.target.value || null)}
                   className="bg-gray-800 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200">
                   <option value="">— choose team —</option>
-                  {activeTeams.map(t => <option key={t.team_id} value={t.team_id}>{t.name}</option>)}
+                  {seatedTeams.map(t => <option key={t.team_id} value={t.team_id}>{seatLabel(t)}</option>)}
                 </select>
                 <button onClick={handleNextTeamPicker} className="bg-gray-700 hover:bg-gray-600 transition-all px-3 py-1.5 rounded-lg text-sm font-medium text-gray-200">Next Team ▶</button>
               </div>
