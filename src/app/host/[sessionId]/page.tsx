@@ -804,7 +804,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                   <select value={answerTeamId || ''} onChange={e => setAnswerTeamId(e.target.value || null)}
                     className="bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200">
                     <option value="">— choose team —</option>
-                    {activeTeams.map(t => <option key={t.team_id} value={t.team_id}>{t.name}</option>)}
+                    {seatedTeams.map(t => <option key={t.team_id} value={t.team_id}>{seatLabel(t)}</option>)}
                   </select>
                 </div>
               ) : null}

@@ -424,7 +424,9 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   // round's buzzer_enabled flag, not its type, so an MCQ round with the buzzer switched on used
   // to push display_state to 'buzzer_open' — a state no branch here matched, leaving every team's
   // screen completely blank with the projector still saying BUZZER OPEN.
-  const isBuzzerRound = roundType === 'BUZZER' || roundType === 'PICTURE_BUZZER' || buzzerEnabled;
+  // buzzer_enabled alone decides this — the round type only says which questions are drawn. A
+  // picture round with the buzzer switched off is a normal round the host works round the table.
+  const isBuzzerRound = buzzerEnabled;
   const isMyTurn = teamPicksCategory && team && sessionData?.current_picker_team_id === team.id;
   const questionMedia = questionImages(question);
 

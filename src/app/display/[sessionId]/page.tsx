@@ -234,7 +234,7 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
   // Matches the team console's rule exactly: the host's Open Buzzer button is gated on
   // buzzer_enabled rather than round_type, so an MCQ round with the buzzer switched on is a
   // buzzer round for every purpose the screens care about.
-  const isBuzzerRound = round?.round_type === 'BUZZER' || round?.round_type === 'PICTURE_BUZZER' || !!round?.buzzer_enabled;
+  const isBuzzerRound = !!round?.buzzer_enabled;
 
   let remaining: number | null = null;
   const ts = sessionData?.timer_state;

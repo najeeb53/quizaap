@@ -26,10 +26,14 @@ type Round = {
 
 type Category = { id: string; name: string };
 
+// The round type decides WHICH QUESTIONS the round draws from the bank — nothing else. Whether
+// teams buzz is the separate "Enable buzzer" setting, so a picture round can equally be a buzzer
+// race or the host working round the table. The stored values are unchanged (BUZZER and
+// PICTURE_BUZZER are historical names); only what they promise the admin has been corrected.
 const ROUND_TYPES = [
-  { value: 'MCQ', label: 'MCQ' },
-  { value: 'BUZZER', label: 'MCQ + Buzzer' },
-  { value: 'PICTURE_BUZZER', label: 'Picture + Buzzer' },
+  { value: 'MCQ', label: 'MCQ — text questions' },
+  { value: 'BUZZER', label: 'MCQ — text questions (alternate)' },
+  { value: 'PICTURE_BUZZER', label: 'Picture — image questions' },
   { value: 'SEQUENCING', label: 'Sequencing (drag-and-drop)' },
   { value: 'RAPID_FIRE', label: 'Rapid Fire' },
 ];
@@ -116,7 +120,13 @@ function RoundForm({ form, setForm, saving, onSubmit, onCancel, title, categorie
         <label className="flex items-start gap-3 text-sm text-gray-700 col-span-2 bg-yellow-50 p-3 rounded-lg border border-yellow-200">
           <input type="checkbox" checked={form.buzzer_enabled} className="mt-1"
             onChange={e => setForm(f => ({ ...f, buzzer_enabled: e.target.checked }))} />
-          <span><strong>Enable buzzer</strong> for this round</span>
+          <span>
+            <strong>Enable buzzer</strong> for this round
+            <em className="block not-italic text-xs text-gray-500 mt-1">
+              On: teams race to buzz in, and the buzz decides who answers. Off: the host asks the
+              teams in seating order and records the result.
+            </em>
+          </span>
         </label>
         <label className="flex items-start gap-3 text-sm text-gray-700 col-span-2 bg-red-50 p-3 rounded-lg border border-red-200">
           <input type="checkbox" checked={form.elimination_enabled} className="mt-1"
@@ -197,7 +207,10 @@ export default function RoundsPage() {
       marks_wrong: Number(form.marks_wrong) || 0,
       marks_skip: Number(form.marks_skip) || 0,
       timer_seconds: Number(form.timer_seconds) || 0,
-      buzzer_enabled: form.buzzer_enabled || form.round_type === 'BUZZER' || form.round_type === 'PICTURE_BUZZER',
+      // Saved exactly as ticked. This used to be forced true for the BUZZER and PICTURE_BUZZER
+      // types, so unticking it on those rounds silently reverted — and there was no way at all to
+      // run a picture round without a buzzer, even though the two are unrelated choices.
+      buzzer_enabled: form.buzzer_enabled,
       elimination_enabled: form.elimination_enabled,
       elimination_count: Number(form.elimination_count) || 0,
       category_selection: form.category_selection,

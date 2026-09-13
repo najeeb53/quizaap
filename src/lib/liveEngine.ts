@@ -60,8 +60,10 @@ async function autoStartTimerState(sessionId: string, seconds: number | null | u
  * needs one. */
 async function autoStartTimerStateForRound(sessionId: string, roundId: string | null | undefined) {
   if (!roundId) return {};
-  const { data: round } = await supabase.from('rounds').select('timer_seconds, buzzer_enabled, round_type').eq('id', roundId).maybeSingle();
-  if (round?.buzzer_enabled || round?.round_type === 'BUZZER' || round?.round_type === 'PICTURE_BUZZER') return {};
+  const { data: round } = await supabase.from('rounds').select('timer_seconds, buzzer_enabled').eq('id', roundId).maybeSingle();
+  // buzzer_enabled alone — the round TYPE only says which questions the round draws. Testing the
+  // type here meant a picture round could never have a countdown even with its buzzer switched off.
+  if (round?.buzzer_enabled) return {};
   return autoStartTimerState(sessionId, round?.timer_seconds);
 }
 
