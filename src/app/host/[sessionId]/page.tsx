@@ -11,6 +11,8 @@ import {
   fetchPickItems, computeCurrentTierAsync, type TierResult, setCurrentPicker, openCategoryPicks, pickCategory,
   submitAnswer, startRapidFireTurn, fetchSequenceResults, type SequenceResult,
   passQuestion, fetchPassedTeams, type PassedTeam, PASS_MARKS_CORRECT, declareWinner, resetWinner,
+  tiedForElimination, startTiebreak, resolveTiebreak, cancelTiebreak, fetchTiebreakQuestion,
+  type TiebreakState, type TiebreakQuestion,
 } from '@/lib/liveEngine';
 import { fetchScoreboard, bySeat, type ScoreRow } from '@/lib/scoreboard';
 import { questionTypeForRound } from '@/lib/questionSet';
@@ -52,6 +54,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const [winnerPick, setWinnerPick] = useState<string | null>(null);
   const [roundEliminationCount, setRoundEliminationCount] = useState(0);
   const [eliminatePick, setEliminatePick] = useState<string | null>(null);
+  const [tiebreakQuestion, setTiebreakQuestion] = useState<TiebreakQuestion | null>(null);
   const [recentScores, setRecentScores] = useState<ScoreLogRow[]>([]);
   const [timerNow, setTimerNow] = useState(Date.now());
   // Award and deduction are separate amounts, not one number used with both signs: the house rule
@@ -540,6 +543,27 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     await guard('reset-winner', () => resetWinner(sessionId), 'Failed to reset the winner.');
   }
 
+  // The tie-break question follows the session row, so a host refresh mid-tie-break gets it back.
+  useEffect(() => {
+    const tb = (session?.tiebreak as TiebreakState | null) || null;
+    if (!tb) { setTiebreakQuestion(null); return; }
+    let cancelled = false;
+    fetchTiebreakQuestion(tb).then(q => { if (!cancelled) setTiebreakQuestion(q); });
+    return () => { cancelled = true; };
+  }, [session?.tiebreak]);
+
+  async function handleStartTiebreak() {
+    if (!session || tiedTeamIds.length < 2) return;
+    await guard('tiebreak', () => startTiebreak(sessionId, session.current_round_id, tiedTeamIds),
+      'Could not start the tie-break.');
+  }
+
+  async function handleResolveTiebreak(teamId: string, teamName: string) {
+    await guard('tiebreak-resolve',
+      () => resolveTiebreak(sessionId, teamId, `Lost the tie-break after ${round?.name || 'the round'}`),
+      `${teamName} was NOT eliminated.`);
+  }
+
   async function handleEliminate(teamId: string) {
     await guard(`elim:${teamId}`, () => eliminateTeam(sessionId, teamId, session?.current_round_id || null, `Eliminated after ${round?.name || 'round'}`), 'Failed to eliminate that team.');
   }
@@ -584,6 +608,10 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const seatedTeams = [...activeTeams].sort(bySeat);
   const pickerTeam = activeTeams.find(t => t.team_id === session?.current_picker_team_id);
   const seatLabel = (t: ScoreRow) => (t.turn_order ? `${t.turn_order}. ${t.name}` : t.name);
+  const tiedTeamIds = tiedForElimination(scoreboard);
+  const tiebreakTeams = (((session?.tiebreak as TiebreakState | null)?.team_ids) || [])
+    .map(id => activeTeams.find(t => t.team_id === id))
+    .filter((t): t is ScoreRow => !!t);
 
   if (!session) return <p className="text-gray-400">Loading session…</p>;
 
@@ -688,6 +716,54 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 </p>
               )}
             </div>
+          ) : session.display_state === 'tiebreak' ? (
+            <div className="mb-4 bg-amber-950/40 border-2 border-amber-500/60 rounded-2xl p-5">
+              <p className="text-xl font-bold text-amber-300 mb-1">⚖️ Tie-break</p>
+              <p className="text-sm text-gray-300 mb-4">
+                {tiebreakTeams.map(t => t.name).join(' vs ')} — one question, the loser is eliminated.
+              </p>
+              {tiebreakQuestion ? (
+                <>
+                  <p className={`text-lg text-white mb-2 ${arabicClass(tiebreakQuestion.text)}`} dir={arabicDir(tiebreakQuestion.text)}>
+                    {tiebreakQuestion.text}
+                  </p>
+                  {tiebreakQuestion.options.length > 0 && (
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      {tiebreakQuestion.options.map((o, i) => (
+                        <div key={o.option_key}
+                          className={`rounded-lg px-3 py-2 text-sm border ${
+                            o.option_key === tiebreakQuestion.answer
+                              ? 'bg-emerald-900/50 border-emerald-500/60 text-emerald-200'
+                              : 'bg-gray-900/70 border-gray-700 text-gray-300'
+                          } ${arabicClass(o.option_text)}`}>
+                          {String.fromCharCode(65 + i)}. {o.option_text}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-sm text-amber-400 mb-4">
+                    Answer (host only): <b>{tiebreakQuestion.answer || '—'}</b>
+                  </p>
+                </>
+              ) : (
+                <p className="text-sm text-gray-400 mb-4">Loading the tie-break question…</p>
+              )}
+              <p className="text-xs text-gray-400 mb-2">Whoever gets it wrong goes out:</p>
+              <div className="flex flex-wrap gap-2">
+                {tiebreakTeams.map(t => (
+                  <button key={t.team_id}
+                    onClick={() => { if (confirm(`Eliminate ${t.name} — lost the tie-break?`)) handleResolveTiebreak(t.team_id, t.name); }}
+                    disabled={isBusy('tiebreak-resolve')}
+                    className={`bg-red-600 hover:bg-red-500 disabled:opacity-40 transition-all px-4 py-2 rounded-lg text-sm font-bold text-white shadow-md ${arabicClass(t.name)}`}>
+                    Eliminate {t.name}
+                  </button>
+                ))}
+                <button onClick={() => { if (confirm('Cancel the tie-break? No one is eliminated.')) cancelTiebreak(sessionId); }}
+                  className="bg-gray-600 hover:bg-gray-500 transition-all px-4 py-2 rounded-lg text-sm font-medium text-white">
+                  Cancel
+                </button>
+              </div>
+            </div>
           ) : session.display_state === 'round_complete' ? (
             <div className="mb-4 bg-emerald-950/40 border-2 border-emerald-600/60 rounded-2xl p-6 text-center">
               <p className="text-2xl font-bold text-emerald-300 mb-1">✓ Round Complete</p>
@@ -702,11 +778,28 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                     <p className="text-sm text-red-300 font-semibold mb-3 text-center">
                       ⚠️ This round eliminates {round.elimination_count} team{round.elimination_count === 1 ? '' : 's'} — {roundEliminationCount} of {round.elimination_count} done so far.
                     </p>
+                    {/* A tie for last place can't be settled by the scoreboard, and choosing by
+                        judgement in front of the hall is where a quiz loses the room. Offer the
+                        sudden-death question before the manual dropdown, so it's the obvious move. */}
+                    {tiedTeamIds.length > 1 && (
+                      <div className="mb-4 bg-amber-950/50 border-2 border-amber-500/60 rounded-xl p-3 text-center">
+                        <p className="text-sm text-amber-200 font-semibold mb-1">
+                          ⚖️ Tie for last place — {tiedTeamIds.map(id => activeTeams.find(t => t.team_id === id)?.name).filter(Boolean).join(' and ')} on {activeTeams.find(t => t.team_id === tiedTeamIds[0])?.total} pts
+                        </p>
+                        <p className="text-xs text-amber-300/70 mb-3">
+                          Runs one unused question on the projector for these teams only.
+                        </p>
+                        <button onClick={handleStartTiebreak} disabled={isBusy('tiebreak')}
+                          className="bg-amber-600 hover:bg-amber-500 disabled:opacity-40 transition-all px-5 py-2 rounded-lg text-sm font-bold text-white shadow-md">
+                          {isBusy('tiebreak') ? 'Drawing…' : '⚖️ Run Tie-break'}
+                        </button>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2 justify-center">
                       <select value={eliminatePick ?? ''} onChange={e => setEliminatePick(e.target.value || null)}
                         className="bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200">
                         <option value="">— choose team to eliminate —</option>
-                        {activeTeams.map(t => <option key={t.team_id} value={t.team_id}>{t.name}</option>)}
+                        {seatedTeams.map(t => <option key={t.team_id} value={t.team_id}>{seatLabel(t)} — {t.total} pts</option>)}
                       </select>
                       <button
                         onClick={() => { if (eliminatePick && confirm(`Eliminate ${activeTeams.find(t => t.team_id === eliminatePick)?.name}?`)) { handleEliminate(eliminatePick); setEliminatePick(null); } }}

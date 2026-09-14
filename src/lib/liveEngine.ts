@@ -15,6 +15,7 @@ export type LiveSession = {
   started_at: string | null;
   ended_at: string | null;
   winner_team_id?: string | null;
+  tiebreak?: unknown;
 };
 
 export type RoundRow = {
@@ -601,6 +602,118 @@ export async function undoScore(score: { id: string; session_id: string; team_id
 // ---- elimination ----
 /** No-ops if the team is already eliminated, so a double-click can't leave two open elimination
  * rows (which would then need two restores to undo). */
+// ---- tie-break ----
+// Two teams level on points at an elimination can't be separated by the scoreboard, and picking
+// one by judgement in front of a hall is exactly the moment a quiz loses the room. The host runs
+// one extra question for the tied teams only, on the projector, and eliminates on the result.
+
+export type TiebreakState = {
+  team_ids: string[];
+  question_id: string;
+  option_order: string[];
+  round_id: string | null;
+};
+
+export type TiebreakQuestion = {
+  id: string; text: string; type: string; answer: string | null;
+  media_url: string | null; media_urls?: string[] | null;
+  options: { option_key: string; option_text: string }[];
+};
+
+/** Teams that cannot be separated for the next elimination: everyone tied on the lowest total
+ * among those still in. Returns [] when the bottom place is held outright — there is no tie to
+ * break, and the host should just eliminate the lowest scorer. */
+export function tiedForElimination(rows: { team_id: string; total: number; eliminated: boolean }[]): string[] {
+  const live = rows.filter(r => !r.eliminated);
+  if (live.length < 2) return [];
+  const lowest = Math.min(...live.map(r => r.total));
+  const atBottom = live.filter(r => r.total === lowest);
+  return atBottom.length > 1 ? atBottom.map(r => r.team_id) : [];
+}
+
+/** Draws one unused question and puts the session into the tie-break state.
+ *
+ * The question is drawn with the same exclusion the round generator uses — nothing already played
+ * in this session — so a tie-break can't hand the teams a question they have both already heard
+ * the answer to. */
+export async function startTiebreak(sessionId: string, roundId: string | null, teamIds: string[]) {
+  if (teamIds.length < 2) throw new Error('A tie-break needs at least two teams.');
+
+  const { data: round } = roundId
+    ? await supabase.from('rounds').select('round_type, timer_seconds').eq('id', roundId).maybeSingle()
+    : { data: null };
+  const qType = questionTypeForRound(round?.round_type || 'MCQ');
+
+  const { data: used } = await supabase.from('question_set_items')
+    .select('question_id, question_sets!inner(session_id)')
+    .eq('question_sets.session_id', sessionId)
+    .not('question_id', 'is', null);
+  const usedIds = (used || []).map((r: any) => r.question_id);
+
+  let q = supabase.from('questions').select('id')
+    .eq('status', 'active').eq('type', qType).order('id').range(0, 4999);
+  if (usedIds.length > 0) q = q.not('id', 'in', `(${usedIds.join(',')})`);
+  const { data: candidates } = await q;
+  if (!candidates || candidates.length === 0) {
+    throw new Error(`No unused ${qType} questions are left in the bank for a tie-break.`);
+  }
+  const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+
+  const { data: opts } = await supabase.from('question_options').select('option_key').eq('question_id', chosen.id);
+  const optionOrder = shuffleArr((opts || []).map((o: any) => o.option_key));
+
+  const tiebreak: TiebreakState = {
+    team_ids: teamIds, question_id: chosen.id, option_order: optionOrder, round_id: roundId,
+  };
+  const { error } = await supabase.from('live_sessions').update({
+    tiebreak, display_state: 'tiebreak',
+    timer_state: await autoStartTimerStateForRound(sessionId, roundId),
+  }).eq('id', sessionId);
+  if (error) throw error;
+  await logEvent(sessionId, 'tiebreak_started', { teamIds, questionId: chosen.id, roundId });
+}
+
+/** The tie-break's question, with its options in the shuffled order every screen shares. */
+export async function fetchTiebreakQuestion(tb: TiebreakState | null): Promise<TiebreakQuestion | null> {
+  if (!tb?.question_id) return null;
+  const { data: q } = await supabase.from('questions')
+    .select('id, text, type, answer, media_url, media_urls').eq('id', tb.question_id).maybeSingle();
+  if (!q) return null;
+  const { data: opts } = await supabase.from('question_options')
+    .select('option_key, option_text').eq('question_id', q.id);
+  const order = tb.option_order || [];
+  const options = [...(opts || [])].sort((a, b) => order.indexOf(a.option_key) - order.indexOf(b.option_key));
+  return { ...q, options } as TiebreakQuestion;
+}
+
+/** Eliminates the team that lost the tie-break and clears the tie-break from the screen.
+ *
+ * Exactly one team goes per tie-break, whatever the round's quota: over-eliminating is not
+ * recoverable in front of an audience, and a second tie (three teams level) is better handled by
+ * the host running a second tie-break than by the app guessing. */
+export async function resolveTiebreak(sessionId: string, eliminatedTeamId: string, reason: string) {
+  const { data: sess } = await supabase.from('live_sessions').select('tiebreak, current_round_id').eq('id', sessionId).maybeSingle();
+  const tb = sess?.tiebreak as TiebreakState | null;
+  if (!tb) throw new Error('There is no tie-break running.');
+  if (!tb.team_ids.includes(eliminatedTeamId)) {
+    throw new Error('That team is not in this tie-break.');
+  }
+  await eliminateTeam(sessionId, eliminatedTeamId, tb.round_id ?? sess?.current_round_id ?? null, reason);
+  await supabase.from('live_sessions').update({
+    tiebreak: null, display_state: 'scoreboard', timer_state: {},
+  }).eq('id', sessionId);
+  await logEvent(sessionId, 'tiebreak_resolved', { eliminatedTeamId, teamIds: tb.team_ids });
+}
+
+/** Abandons a tie-break without eliminating anyone — a mis-click, or a question the host judges
+ * unusable once it is on screen. */
+export async function cancelTiebreak(sessionId: string) {
+  await supabase.from('live_sessions').update({
+    tiebreak: null, display_state: 'scoreboard', timer_state: {},
+  }).eq('id', sessionId);
+  await logEvent(sessionId, 'tiebreak_cancelled', {});
+}
+
 export async function eliminateTeam(sessionId: string, teamId: string, roundId: string | null, reason: string) {
   const { count } = await supabase.from('eliminations').select('id', { count: 'exact', head: true })
     .eq('session_id', sessionId).eq('team_id', teamId).is('reversed_at', null);

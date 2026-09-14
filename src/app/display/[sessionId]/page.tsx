@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef, use } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
-import { fetchPickItems, computeCurrentTierAsync, fetchSequenceResults, fetchWinner, type PickItem, type TierResult, type SequenceResult, type WinnerInfo } from '@/lib/liveEngine';
+import { fetchPickItems, computeCurrentTierAsync, fetchSequenceResults, fetchWinner, fetchTiebreakQuestion, type PickItem, type TierResult, type SequenceResult, type WinnerInfo, type TiebreakState, type TiebreakQuestion } from '@/lib/liveEngine';
 import { questionTypeForRound } from '@/lib/questionSet';
 import { arabicClass, arabicDir, containsArabic } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
@@ -29,6 +29,8 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
   const [correctSequence, setCorrectSequence] = useState<string[]>([]);
   const [seqResults, setSeqResults] = useState<SequenceResult[]>([]);
   const [winner, setWinner] = useState<WinnerInfo | null>(null);
+  const [tiebreakQuestion, setTiebreakQuestion] = useState<TiebreakQuestion | null>(null);
+  const [tiebreakTeamNames, setTiebreakTeamNames] = useState<string[]>([]);
   const [revealedAnswer, setRevealedAnswer] = useState<string | null>(null);
   const [buzzFirst, setBuzzFirst] = useState<string | null>(null);
   const [buzzOrder, setBuzzOrder] = useState<{ team_id: string; status: string; team_name?: string }[]>([]);
@@ -158,6 +160,21 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
     fetchWinner(sessionData.winner_team_id).then(setWinner);
   }, [sessionData?.display_state, sessionData?.winner_team_id]);
 
+  // Tie-break: the question, plus the names of the teams contesting it. Both come off the session
+  // row, so the projector picks a tie-break back up after a reconnect like any other state.
+  useEffect(() => {
+    const tb = (sessionData?.tiebreak as TiebreakState | null) || null;
+    if (!tb) { setTiebreakQuestion(null); setTiebreakTeamNames([]); return; }
+    let cancelled = false;
+    fetchTiebreakQuestion(tb).then(q => { if (!cancelled) setTiebreakQuestion(q); });
+    supabase.from('teams').select('id, name').in('id', tb.team_ids).then(({ data }) => {
+      if (cancelled) return;
+      // Ordered to match the tie-break's own team list, not whatever order the rows came back in.
+      setTiebreakTeamNames(tb.team_ids.map(id => (data || []).find(t => t.id === id)?.name).filter(Boolean) as string[]);
+    });
+    return () => { cancelled = true; };
+  }, [sessionData?.tiebreak]);
+
   // Live-updating while the scoreboard is up: it used to be a one-shot snapshot taken when the
   // host switched to it, so any correction made while it was on the projector stayed invisible.
   useEffect(() => {
@@ -272,6 +289,38 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
           <p className="text-4xl font-bold text-emerald-300 mb-3">✓ Round Complete</p>
           {round && <p className={`text-2xl text-gray-300 ${arabicClass(round.name)}`}>{round.name}</p>}
         </div>
+      )}
+
+      {state === 'tiebreak' && (
+        tiebreakQuestion ? (
+          <div className="rounded-3xl border-4 border-amber-400/70 bg-gradient-to-br from-amber-950/40 via-gray-950 to-amber-950/40 shadow-2xl shadow-amber-900/40 px-12 py-12">
+            <p className="text-2xl tracking-[0.3em] text-amber-300/80 uppercase mb-3">⚖️ Tie-break</p>
+            <p className="text-4xl font-bold text-amber-200 mb-10">
+              {tiebreakTeamNames.join('  vs  ')}
+            </p>
+            {questionImages(tiebreakQuestion).length > 0 && (
+              <div className={`grid gap-6 mb-8 ${questionImages(tiebreakQuestion).length > 1 ? 'grid-cols-2 max-w-4xl mx-auto' : ''}`}>
+                {questionImages(tiebreakQuestion).map((url, i) => (
+                  <img key={url} src={url} alt={`Tie-break image ${i + 1}`} className="max-h-[24rem] w-full rounded-xl mx-auto shadow-xl object-contain" />
+                ))}
+              </div>
+            )}
+            <p className={`text-5xl font-bold text-white leading-snug ${arabicClass(tiebreakQuestion.text)}`} dir={arabicDir(tiebreakQuestion.text)}>
+              {tiebreakQuestion.text}
+            </p>
+            {tiebreakQuestion.options.length > 0 && (
+              <div className="grid grid-cols-2 gap-6 text-3xl mt-10">
+                {tiebreakQuestion.options.map((o, i) => (
+                  <div key={o.option_key} className={`p-5 rounded-2xl border-2 bg-gradient-to-br from-blue-900 to-blue-950 border-gray-700/50 border-l-4 border-l-amber-400 ${arabicClass(o.option_text)}`}>
+                    {String.fromCharCode(65 + i)}. {o.option_text}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-3xl text-gray-400">Drawing a tie-break question…</p>
+        )
       )}
 
       {state === 'winners' && (
@@ -464,7 +513,7 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
           identical to a crash from the back of the room. */}
       {state === 'question' && !question && <p className="text-4xl text-gray-500">Loading question…</p>}
       {state === 'round_intro' && !round && <p className="text-4xl text-gray-500">Loading round…</p>}
-      {!['idle', 'round_intro', 'round_complete', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'winners', 'blank'].includes(state) && (
+      {!['idle', 'round_intro', 'round_complete', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'winners', 'tiebreak', 'blank'].includes(state) && (
         <p className="text-4xl text-gray-500">Standby…</p>
       )}
     </div>
