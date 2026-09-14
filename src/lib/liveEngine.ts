@@ -422,6 +422,38 @@ export async function judgeBuzzAnswer(
   }
 }
 
+/** Scores a question the host judged by ear — a picture the team named aloud, an open question with
+ * no options to click. It is the same transaction a buzz or an MCQ reveal produces: tied to the
+ * question item, so Reset Question takes it back, and carrying the round's own marks rather than
+ * whatever is typed in the manual console.
+ *
+ * Without this a round with no buzzer AND no options had no scoring control at all: Lock Answer
+ * needs options to click, Reveal grades the answers table (empty for such a question), and the
+ * ✓/✗ buttons live inside Buzzer Activity, which is hidden when the buzzer is off.
+ *
+ * Guarded against double-scoring the same team on the same question — the buttons stay live after
+ * a click, and a host confirming a score twice would otherwise award it twice. */
+export async function judgeAnswerByHost(
+  sessionId: string, itemId: string, teamId: string, roundId: string | null,
+  correct: boolean, marksCorrect: number, marksWrong: number
+) {
+  const { count } = await supabase.from('scores')
+    .select('id', { count: 'exact', head: true })
+    .eq('session_id', sessionId).eq('question_set_item_id', itemId).eq('team_id', teamId)
+    .eq('source', 'host_judged');
+  if ((count || 0) > 0) throw new Error('This team has already been scored on this question.');
+
+  const points = correct ? marksCorrect : -Math.abs(marksWrong);
+  if (points !== 0) {
+    const { error } = await supabase.from('scores').insert({
+      session_id: sessionId, team_id: teamId, round_id: roundId, question_set_item_id: itemId, points,
+      reason: correct ? 'Correct answer' : 'Wrong answer', source: 'host_judged',
+    });
+    if (error) throw error;
+  }
+  await logEvent(sessionId, 'host_judged', { itemId, teamId, correct, points });
+}
+
 // ---- MCQ answers ----
 // Upsert (not plain insert) because the host can re-lock a different option for the same
 // team/question before Reveal — e.g. correcting a misclick — and there's a unique constraint

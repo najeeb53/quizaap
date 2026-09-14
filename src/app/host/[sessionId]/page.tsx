@@ -11,7 +11,7 @@ import {
   fetchPickItems, computeCurrentTierAsync, type TierResult, setCurrentPicker, openCategoryPicks, pickCategory,
   submitAnswer, startRapidFireTurn, fetchSequenceResults, type SequenceResult,
   passQuestion, fetchPassedTeams, type PassedTeam, PASS_MARKS_CORRECT, declareWinner, resetWinner,
-  tiedForElimination, startTiebreak, resolveTiebreak, cancelTiebreak, fetchTiebreakQuestion,
+  tiedForElimination, startTiebreak, resolveTiebreak, cancelTiebreak, fetchTiebreakQuestion, judgeAnswerByHost,
   type TiebreakState, type TiebreakQuestion,
 } from '@/lib/liveEngine';
 import { fetchScoreboard, bySeat, type ScoreRow } from '@/lib/scoreboard';
@@ -552,6 +552,14 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
     return () => { cancelled = true; };
   }, [session?.tiebreak]);
 
+  async function handleHostJudge(correct: boolean) {
+    const itemId = session?.current_question_set_item_id;
+    if (!itemId || !answeringTeamId || !round) return;
+    await guard('host-judge',
+      () => judgeAnswerByHost(sessionId, itemId, answeringTeamId, round.id, correct, round.marks_correct, round.marks_wrong),
+      'The score was NOT recorded.');
+  }
+
   async function handleStartTiebreak() {
     if (!session || tiedTeamIds.length < 2) return;
     await guard('tiebreak', () => startTiebreak(sessionId, session.current_round_id, tiedTeamIds),
@@ -608,6 +616,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const seatedTeams = [...activeTeams].sort(bySeat);
   const pickerTeam = activeTeams.find(t => t.team_id === session?.current_picker_team_id);
   const seatLabel = (t: ScoreRow) => (t.turn_order ? `${t.turn_order}. ${t.name}` : t.name);
+  const answeringTeamName = activeTeams.find(t => t.team_id === answeringTeamId)?.name || null;
   const tiedTeamIds = tiedForElimination(scoreboard);
   const tiebreakTeams = (((session?.tiebreak as TiebreakState | null)?.team_ids) || [])
     .map(id => activeTeams.find(t => t.team_id === id))
@@ -824,6 +833,34 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
               )}
               {question.type === 'PICTURE' && question.answer && (
                 <p className="text-sm text-amber-400 mt-1">Reference answer (host only): {question.answer}</p>
+              )}
+
+              {/* Score a question the host judged by ear. Shown when there is nothing to auto-grade
+                  — no options to lock, no buzzer to judge — which is exactly a picture round with
+                  the buzzer switched off. */}
+              {options.length === 0 && question.type !== 'SEQUENCE' && !round?.buzzer_enabled
+                && session.display_state !== 'answer_reveal' && (
+                <div className="mt-3 mb-1 bg-gray-900/70 border border-gray-700 rounded-xl p-3">
+                  <p className="text-xs text-gray-400 mb-2">
+                    Score by hand — {answeringTeamName
+                      ? <>answering: <b className={`text-gray-200 ${arabicClass(answeringTeamName)}`}>{answeringTeamName}</b></>
+                      : <span className="text-amber-400">no answering team yet</span>}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => handleHostJudge(true)}
+                      disabled={!answeringTeamId || isBusy('host-judge')}
+                      className="bg-[#10b981] hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition-all px-4 py-2 rounded-lg text-sm font-bold text-white shadow-md">
+                      ✓ Correct +{round?.marks_correct ?? 0}
+                    </button>
+                    <button
+                      onClick={() => handleHostJudge(false)}
+                      disabled={!answeringTeamId || isBusy('host-judge')}
+                      className="bg-[#ef4444] hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition-all px-4 py-2 rounded-lg text-sm font-bold text-white shadow-md">
+                      ✗ Wrong −{Math.abs(round?.marks_wrong ?? 0)}
+                    </button>
+                  </div>
+                </div>
               )}
               {question.type === 'SEQUENCE' && (
                 <div className="mt-1 mb-1">
