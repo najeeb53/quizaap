@@ -390,7 +390,10 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
           {questionImages(question).length > 0 && (
             <div className={`grid gap-6 mb-10 ${questionImages(question).length > 1 ? 'grid-cols-2 max-w-4xl mx-auto' : ''}`}>
               {questionImages(question).map((url, i) => (
-                <img key={url} src={url} alt={`Question image ${i + 1}`} className="max-h-[28rem] w-full rounded-xl mx-auto shadow-xl object-contain" />
+                // Sized against the SCREEN, not a fixed 28rem: on a picture question the image plus
+                // the 7xl question text could run taller than the projector, pushing the countdown
+                // below the bottom edge where nobody could see it.
+                <img key={url} src={url} alt={`Question image ${i + 1}`} className="max-h-[45vh] w-full rounded-xl mx-auto shadow-xl object-contain" />
               ))}
             </div>
           )}
@@ -455,13 +458,6 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
               The test used to be on round_type alone, which missed an MCQ round with the buzzer
               switched on (buzzer_enabled is what the host console actually gates the buzzer on),
               so Round 4 showed a countdown the teams' own screens were already hiding. */}
-          {remaining !== null && !isBuzzerRound && (state === 'question' || state === 'buzzer_open') && (
-            <div className="mt-10 flex justify-center">
-              <div className={`inline-flex items-center justify-center rounded-full w-40 h-40 text-6xl font-mono font-bold border-4 shadow-xl ${remaining <= 5 ? 'border-red-400 text-red-300 bg-red-950/60 shadow-red-900/50 animate-pulse' : remaining <= 10 ? 'border-amber-400 text-amber-300 bg-amber-950/50 shadow-amber-900/40' : 'border-green-400 text-green-300 bg-green-950/40 shadow-green-900/30'}`}>
-                {remaining}s
-              </div>
-            </div>
-          )}
           {state === 'buzzer_open' && (
             <div className="mt-10">
               <div className="inline-block px-8 py-4 rounded-2xl bg-red-950/50 border-2 border-red-500/70 shadow-lg shadow-red-900/50">
@@ -515,6 +511,22 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
       {state === 'round_intro' && !round && <p className="text-4xl text-gray-500">Loading round…</p>}
       {!['idle', 'round_intro', 'round_complete', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'winners', 'tiebreak', 'blank'].includes(state) && (
         <p className="text-4xl text-gray-500">Standby…</p>
+      )}
+
+      {/* The countdown is pinned to the screen rather than placed after the question, because it
+          used to sit at the bottom of the question card: on a picture question the image and the
+          7xl text pushed it past the bottom edge of the projector, so a round with a timer running
+          appeared to have no timer at all. Fixed position means it is visible for every question
+          type, however tall the content above it. */}
+      {remaining !== null && !isBuzzerRound && (state === 'question' || state === 'buzzer_open' || state === 'tiebreak') && (
+        <div className="fixed bottom-8 right-8 z-50 pointer-events-none">
+          <div className={`flex items-center justify-center rounded-full w-36 h-36 text-5xl font-mono font-bold border-4 shadow-2xl backdrop-blur ${
+            remaining <= 5 ? 'border-red-400 text-red-300 bg-red-950/80 shadow-red-900/50 animate-pulse'
+            : remaining <= 10 ? 'border-amber-400 text-amber-300 bg-amber-950/80 shadow-amber-900/40'
+            : 'border-green-400 text-green-300 bg-green-950/80 shadow-green-900/30'}`}>
+            {remaining}s
+          </div>
+        </div>
       )}
     </div>
   );
