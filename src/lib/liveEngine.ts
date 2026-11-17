@@ -1,5 +1,5 @@
 import { supabase } from './supabaseClient';
-import { DIFFICULTY_ORDER, questionTypeForRound } from './questionSet';
+import { DIFFICULTY_ORDER, questionTypeForRound, shuffleOptionKeys } from './questionSet';
 import { dbNow } from './serverClock';
 
 // ---- shared types ----
@@ -276,8 +276,8 @@ export async function pickCategory(sessionId: string, itemId: string, teamId: st
   }
   const chosen = candidates[Math.floor(Math.random() * candidates.length)];
 
-  const { data: opts } = await supabase.from('question_options').select('option_key').eq('question_id', chosen.id);
-  const optionOrder = shuffleArr((opts || []).map((o: any) => o.option_key));
+  const { data: opts } = await supabase.from('question_options').select('option_key, sort_order').eq('question_id', chosen.id);
+  const optionOrder = shuffleOptionKeys(opts || []);
 
   // Only claim a slot that is still free. Two clients (the host's grid and the picking team's own
   // screen) can both act on the same slot; without this, the second write silently replaced the
@@ -552,10 +552,16 @@ export async function gradeAndReveal(sessionId: string, itemId: string, roundId:
   // smaller, flat bonus since they got a question other teams already had a crack at, not their
   // own fresh pick. A wrong answer after a pass still costs the round's normal marks_wrong;
   // passing itself never costs anything (no row is written for the team that declines to answer).
-  const { count: passCount } = await supabase.from('question_passes')
-    .select('id', { count: 'exact', head: true })
+  const { data: passRows } = await supabase.from('question_passes')
+    .select('team_id')
     .eq('session_id', sessionId).eq('question_set_item_id', itemId);
-  const effectiveMarksCorrect = (passCount || 0) > 0 ? PASS_MARKS_CORRECT : (round?.marks_correct ?? 0);
+  const passedTeamIds = new Set((passRows || []).map((p: any) => p.team_id as string));
+  const wasPassed = passedTeamIds.size > 0;
+  const effectiveMarksCorrect = wasPassed ? PASS_MARKS_CORRECT : (round?.marks_correct ?? 0);
+  // A passed question is not the answering team's own, so getting it wrong costs them nothing —
+  // the +5 is a bonus on offer, not a risk. Only the team the question was originally put to can
+  // lose marks_wrong on it, and only by answering (no pass on the item at all).
+  const effectiveMarksWrong = wasPassed ? 0 : Math.abs(round?.marks_wrong ?? 0);
 
   let correctOrder: string[] | null = null;
   if (question?.type === 'SEQUENCE') {
@@ -585,7 +591,9 @@ export async function gradeAndReveal(sessionId: string, itemId: string, roundId:
     // marks_wrong is a penalty MAGNITUDE (how many points to dock), whichever sign it was
     // saved with — always subtract its absolute value so a round saved as either 5 or -5
     // behaves the same way, rather than a stray "-5" flipping into a +5 bonus.
-    const awarded = isCorrect ? effectiveMarksCorrect : -Math.abs(round?.marks_wrong ?? 0);
+    // A team that passed on this question is out of it: whatever was locked in for them before
+    // they passed neither earns nor costs anything.
+    const awarded = passedTeamIds.has(a.team_id) ? 0 : isCorrect ? effectiveMarksCorrect : -effectiveMarksWrong;
     // Upsert on the primary key, so the whole batch is one request. `a` came from select('*'),
     // so every NOT NULL column (answer_json in particular) is already on it.
     gradedAnswers.push({ ...a, is_correct: isCorrect, awarded_marks: awarded, locked_at: lockedAt });
@@ -775,7 +783,9 @@ export async function resetCurrentQuestion(sessionId: string, itemId: string) {
     supabase.from('answers').delete().eq('session_id', sessionId).eq('question_set_item_id', itemId),
     supabase.from('buzzer_events').delete().eq('session_id', sessionId).eq('question_set_item_id', itemId),
     supabase.from('scores').delete().eq('session_id', sessionId).eq('question_set_item_id', itemId)
-      .in('source', ['auto_mcq', 'auto_sequence', 'auto_buzzer']),
+      // host_judged too: judgeAnswerByHost refuses to score a team twice on one question, so a
+      // leftover row both kept the old points and blocked re-scoring after a reset.
+      .in('source', ['auto_mcq', 'auto_sequence', 'auto_buzzer', 'host_judged']),
     supabase.from('question_passes').delete().eq('session_id', sessionId).eq('question_set_item_id', itemId),
   ]);
   const err = answers.error || buzzes.error || scores.error || passes.error;
@@ -843,11 +853,14 @@ export async function clearEliminationFlags(sessionId: string) {
 }
 
 export async function resetSession(sessionId: string) {
-  const [answers, buzzes] = await Promise.all([
+  // Passes as well: a pass left over from a rehearsal made gradeAndReveal pay the reduced
+  // PASS_MARKS_CORRECT for that question in the real show, though nobody had passed on it.
+  const [answers, buzzes, passes] = await Promise.all([
     supabase.from('answers').delete().eq('session_id', sessionId),
     supabase.from('buzzer_events').delete().eq('session_id', sessionId),
+    supabase.from('question_passes').delete().eq('session_id', sessionId),
   ]);
-  if (answers.error || buzzes.error) throw answers.error || buzzes.error;
+  if (answers.error || buzzes.error || passes.error) throw answers.error || buzzes.error || passes.error;
 
   const { data: sets } = await supabase.from('question_sets').select('id').eq('session_id', sessionId);
   const setIds = (sets || []).map(s => s.id);

@@ -25,6 +25,21 @@ import { ConnectionBadge } from '@/components/ConnectionBadge';
 
 type Question = { id: string; text: string; type: string; answer: string; media_url: string | null; media_urls?: string[] | null };
 type Option = { option_key: string; option_text: string };
+
+/** The correct answer as the host actually sees it on screen.
+ *
+ * `answer` is the option's stored key (the A/B/C/D it was given in the question bank), but options
+ * are shown in a per-question shuffled order and re-lettered A–D by position. Printing the raw key
+ * therefore named the wrong option whenever the shuffle moved it — "B" pointed at whatever had
+ * landed in the second slot, not at the correct answer. Translate the key to its on-screen letter
+ * and include the text so there is nothing to misread. Questions with no options (picture / open)
+ * keep their free-text reference answer as is. */
+function mcqAnswerLabel(options: Option[], answer: string | null | undefined): string {
+  if (!answer) return '—';
+  const i = options.findIndex(o => o.option_key === answer);
+  if (i < 0) return options.length > 0 ? `${answer} (not one of the options shown — check this question in the bank)` : answer;
+  return `${String.fromCharCode(65 + i)}. ${options[i].option_text}`;
+}
 type BuzzerEvent = { id: string; team_id: string; status: string; buzzed_at: string; team_name?: string };
 // session_id and round_id are carried even though nothing renders them: undoScore writes the
 // reversing row from these fields, and the scoreboard only sums rows matching the session. Without
@@ -751,7 +766,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                     </div>
                   )}
                   <p className="text-sm text-amber-400 mb-4">
-                    Answer (host only): <b>{tiebreakQuestion.answer || '—'}</b>
+                    Answer (host only): <b>{mcqAnswerLabel(tiebreakQuestion.options, tiebreakQuestion.answer)}</b>
                   </p>
                 </>
               ) : (
@@ -914,7 +929,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                   then Buzzer's accepted team, then a category pick, then the host's own dropdown. */}
               {passOverrideTeamId && session.display_state !== 'answer_reveal' ? (
                 <p className="text-xs text-gray-400 mt-2 mb-1">
-                  Answering: <b className="text-gray-200">{activeTeams.find(t => t.team_id === passOverrideTeamId)?.name || '—'}</b> (passed to them — correct answer now worth a fixed +{PASS_MARKS_CORRECT})
+                  Answering: <b className="text-gray-200">{activeTeams.find(t => t.team_id === passOverrideTeamId)?.name || '—'}</b> (passed to them — correct answer now worth a fixed +{PASS_MARKS_CORRECT}, wrong costs nothing)
                 </p>
               ) : round?.buzzer_enabled && !round?.team_picks_category && session.display_state !== 'answer_reveal' ? (
                 /* MCQ + Buzzer: the answering team comes straight from whichever buzz was accepted
@@ -1000,7 +1015,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 </p>
               )}
               {question.type === 'MCQ' && session.display_state !== 'answer_reveal' && (
-                <p className="text-xs text-gray-500 mt-2">Correct answer (host only): {question.answer}</p>
+                <p className="text-xs text-gray-500 mt-2">Correct answer (host only): {mcqAnswerLabel(options, question.answer)}</p>
               )}
             </div>
           ) : (
@@ -1109,6 +1124,13 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
             )}
             <button onClick={() => setDisplayState(sessionId, session.display_state === 'scoreboard' ? 'question' : 'scoreboard')} className="bg-slate-600 hover:bg-slate-500 transition-all px-3 py-1.5 rounded-lg text-sm font-medium text-white">
               {session.display_state === 'scoreboard' ? 'Hide Scoreboard' : 'Show Scoreboard'}
+            </button>
+            {/* Splash = quiz title + library logo on the big screen, for while the host is
+                talking. Hiding it goes back to 'question', same convention as the scoreboard
+                toggle. Before the quiz starts the display shows the splash on 'idle' anyway,
+                so this button mostly matters mid-show, between rounds. */}
+            <button onClick={() => setDisplayState(sessionId, session.display_state === 'splash' ? 'question' : 'splash')} className="bg-[#8a6d2f] hover:brightness-110 transition-all px-3 py-1.5 rounded-lg text-sm font-medium text-white">
+              {session.display_state === 'splash' ? 'Hide Splash' : 'Show Splash'}
             </button>
             <button onClick={() => setDisplayState(sessionId, 'blank')} className="bg-black border border-gray-600 hover:bg-gray-900 transition-all px-3 py-1.5 rounded-lg text-sm font-medium text-white">Blank Display</button>
           </div>

@@ -270,11 +270,19 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
         <ConnectionBadge status={liveStatus} variant="dark" className="text-sm" />
       </div>
 
-      {state === 'idle' && (
-        <>
-          <h1 className="text-8xl font-bold mb-8 bg-gradient-to-r from-blue-400 via-purple-400 to-teal-400 bg-clip-text text-transparent">Live Quiz Show</h1>
-          <p className="text-4xl text-gray-400">Waiting for event to begin…</p>
-        </>
+      {/* Splash: shown automatically before the quiz starts (idle) and whenever the host puts it
+          up from the console ('splash'), e.g. while speaking between rounds. Both images are the
+          original artwork recoloured to gold with a transparent background so they sit on the
+          black stage (the source files had solid white backgrounds). */}
+      {(state === 'idle' || state === 'splash') && (
+        <div className="relative flex flex-col items-center justify-center gap-12 py-10">
+          <div className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_center,rgba(233,200,119,0.09),transparent_65%)]" />
+          <img src="/branding/library-logo.png" alt="Aljamea-tus-Saifiyah Library"
+            className="h-52 object-contain drop-shadow-[0_0_35px_rgba(233,200,119,0.25)]" />
+          <img src="/branding/quiz-title.png" alt="مسابقة كنوز المعارف"
+            className="w-full max-w-5xl object-contain drop-shadow-[0_0_45px_rgba(233,200,119,0.2)]" />
+          <div className="h-px w-80 bg-gradient-to-r from-transparent via-[#e9c877]/70 to-transparent" />
+        </div>
       )}
 
       {state === 'round_intro' && round && (

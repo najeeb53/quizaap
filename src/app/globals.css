@@ -11,6 +11,12 @@
   font-weight: normal;
   font-style: normal;
   font-display: swap;
+  /* Kanz al Marjaan draws its glyph bodies very small inside the em box (measured x-height
+     0.37em vs ~0.53em for Geist), so at the same font-size Arabic looked about 30% smaller
+     than the Latin text next to it. size-adjust scales the rendered glyphs of THIS font only,
+     so Arabic in `text-5xl` now visually matches English in `text-5xl` — and mixed Latin/digits
+     falling back to Geist inside an Arabic line keep their normal size. */
+  size-adjust: 150%;
 }
 
 .font-arabic {
@@ -27,10 +33,16 @@
      class order in the compiled output — an inline `text-left`/`text-center` utility on the
      very same element could otherwise still tie or lose the cascade. */
   text-align: right !important;
-  /* bump relative to whatever size class sits alongside it, so it stays readable
-     across host/team/display's very different base sizes */
-  font-size: 1.5em;
-  line-height: 1.5;
+  /* NO font-size here — there used to be a `font-size: 1.5em` "bump", but because this rule is
+     un-layered it didn't multiply the Tailwind size utility on the same element, it REPLACED it
+     (un-layered CSS beats @layer utilities). An Arabic question styled `text-5xl` was really
+     rendering at 1.5 × the container's 16px base — tiny on the projector. Sizing now comes from
+     the same text-* utilities English uses; the font's small glyphs are compensated by
+     size-adjust on the @font-face above. */
+  /* Roomier lines than the Latin default: with size-adjust the calligraphic ascenders and
+     deep swashes (final meem reaches ~0.74em below baseline) need the extra leading or
+     consecutive lines collide. */
+  line-height: 1.7;
 }
 
 /* Belt-and-suspenders: several list items in team/host/display now also carry a literal

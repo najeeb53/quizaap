@@ -23,6 +23,24 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
+export type OptionKeyRow = { option_key: string; sort_order?: number | null };
+
+/** Shuffled display order for a question's options.
+ *
+ * For a Sequencing question the options' sort_order IS the answer, and a plain shuffle lands on
+ * exactly that order one time in N! (1 in 6 for three items) — the teams and the projector then
+ * open on the puzzle already solved. Reshuffle until it differs. MCQ options carry no sort_order,
+ * so they are just shuffled. */
+export function shuffleOptionKeys(opts: OptionKeyRow[]): string[] {
+  const keys = opts.map(o => o.option_key);
+  const ordered = opts.length > 1 && opts.every(o => typeof o.sort_order === 'number');
+  if (!ordered) return shuffle(keys);
+  const solved = [...opts].sort((a, b) => (a.sort_order as number) - (b.sort_order as number)).map(o => o.option_key);
+  let out = shuffle(keys);
+  for (let tries = 0; tries < 20 && out.every((k, i) => k === solved[i]); tries++) out = shuffle(keys);
+  return out;
+}
+
 /** Loads every active question's id/category/difficulty once, so the generator UI can show
  * accurate per-category-per-difficulty availability without a query per cell. Scoped to one
  * question `type` (MCQ vs PICTURE) — an MCQ round must never pull a picture question or vice
@@ -140,16 +158,16 @@ export function generateTierSlots(tierCounts: Record<string, number>): { difficu
  * needs a DB round-trip and only matters once the final item list is settled). */
 export async function attachShuffledOptionOrder(items: Omit<GeneratedItem, 'option_order'>[]): Promise<GeneratedItem[]> {
   const questionIds = items.map(i => i.question_id);
-  const byQuestion: Record<string, string[]> = {};
+  const byQuestion: Record<string, OptionKeyRow[]> = {};
   if (questionIds.length > 0) {
-    const { data: opts } = await supabase.from('question_options').select('question_id, option_key').in('question_id', questionIds);
-    for (const o of opts || []) (byQuestion[o.question_id] ||= []).push(o.option_key);
+    const { data: opts } = await supabase.from('question_options').select('question_id, option_key, sort_order').in('question_id', questionIds);
+    for (const o of opts || []) (byQuestion[o.question_id] ||= []).push(o);
   }
   // question_id is null for an unfilled team-picks-category slot; indexing with null coerced to the
   // string key "null", which matched nothing.
   return items.map(item => {
     const keys = item.question_id ? byQuestion[item.question_id] : null;
-    return { ...item, option_order: keys ? shuffle(keys) : [] };
+    return { ...item, option_order: keys ? shuffleOptionKeys(keys) : [] };
   });
 }
 
