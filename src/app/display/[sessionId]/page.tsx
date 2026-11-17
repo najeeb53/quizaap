@@ -38,6 +38,7 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
   const [timerNow, setTimerNow] = useState(Date.now());
   const [pickItems, setPickItems] = useState<PickItem[]>([]);
   const [pickerTeamName, setPickerTeamName] = useState<string | null>(null);
+  const [rapidTally, setRapidTally] = useState({ correct: 0, wrong: 0, pass: 0 });
 
   useEffect(() => {
     supabase.from('live_sessions').select('*').eq('id', sessionId).single().then(({ data }) => setSessionData(data));
@@ -204,6 +205,37 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
     return () => { supabase.removeChannel(sub); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, sessionData?.display_state]);
+
+  // Rapid Fire tally for the audience: counted from the same score rows the host's
+  // Correct / Wrong / Pass buttons write (reasons 'Rapid fire correct' etc.), so the projector
+  // always agrees with the host console, and it survives a refresh mid-turn. Live via realtime.
+  useEffect(() => {
+    const teamId = sessionData?.current_picker_team_id;
+    const roundId = sessionData?.current_round_id;
+    if (sessionData?.display_state !== 'rapid_fire' || !teamId || !roundId) {
+      setRapidTally({ correct: 0, wrong: 0, pass: 0 });
+      return;
+    }
+    let cancelled = false;
+    const reload = () => {
+      supabase.from('scores').select('reason')
+        .eq('session_id', sessionId).eq('round_id', roundId).eq('team_id', teamId)
+        .then(({ data }) => {
+          if (cancelled) return;
+          const rows = data || [];
+          setRapidTally({
+            correct: rows.filter(r => r.reason === 'Rapid fire correct').length,
+            wrong: rows.filter(r => r.reason === 'Rapid fire wrong').length,
+            pass: rows.filter(r => r.reason === 'Rapid fire pass').length,
+          });
+        });
+    };
+    reload();
+    const sub = supabase.channel(`display-rapid:${sessionId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'scores', filter: `session_id=eq.${sessionId}` }, reload)
+      .subscribe();
+    return () => { cancelled = true; supabase.removeChannel(sub); };
+  }, [sessionId, sessionData?.display_state, sessionData?.current_picker_team_id, sessionData?.current_round_id]);
 
   useEffect(() => {
     const pickerId = sessionData?.current_picker_team_id;
@@ -494,6 +526,23 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
           <div className={`inline-flex items-center justify-center rounded-full w-[16rem] h-[16rem] border-4 shadow-2xl text-[10rem] leading-none font-mono font-bold ${typeof remaining === 'number' && remaining <= 5 ? 'border-red-400 text-red-300 bg-red-950/50 shadow-red-900/50 animate-pulse' : typeof remaining === 'number' && remaining <= 10 ? 'border-amber-400 text-amber-300 bg-amber-950/50 shadow-amber-900/40' : 'border-teal-400 text-teal-300 bg-teal-950/40 shadow-teal-900/30'}`}>
             {remaining ?? '--'}
           </div>
+          <div className="flex items-stretch gap-6 text-4xl font-bold">
+            <div className="flex flex-col items-center min-w-[11rem] px-8 py-5 rounded-2xl border-2 border-emerald-500/60 bg-emerald-950/50 text-emerald-300">
+              <span className="text-7xl tabular-nums leading-none">{rapidTally.correct}</span>
+              <span className="text-2xl mt-2 tracking-wide uppercase">✓ Correct</span>
+            </div>
+            <div className="flex flex-col items-center min-w-[11rem] px-8 py-5 rounded-2xl border-2 border-red-500/60 bg-red-950/50 text-red-300">
+              <span className="text-7xl tabular-nums leading-none">{rapidTally.wrong}</span>
+              <span className="text-2xl mt-2 tracking-wide uppercase">✗ Wrong</span>
+            </div>
+            <div className="flex flex-col items-center min-w-[11rem] px-8 py-5 rounded-2xl border-2 border-gray-500/60 bg-gray-800/60 text-gray-200">
+              <span className="text-7xl tabular-nums leading-none">{rapidTally.pass}</span>
+              <span className="text-2xl mt-2 tracking-wide uppercase">⤼ {rapidTally.pass === 1 ? 'Pass' : 'Passes'}</span>
+            </div>
+          </div>
+          <p className="text-3xl text-gray-400">
+            <span className="text-white font-bold tabular-nums">{rapidTally.correct + rapidTally.wrong + rapidTally.pass}</span> asked
+          </p>
         </div>
       )}
 
@@ -517,7 +566,7 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
           identical to a crash from the back of the room. */}
       {state === 'question' && !question && <p className="text-4xl text-gray-500">Loading question…</p>}
       {state === 'round_intro' && !round && <p className="text-4xl text-gray-500">Loading round…</p>}
-      {!['idle', 'round_intro', 'round_complete', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'winners', 'tiebreak', 'blank'].includes(state) && (
+      {!['idle', 'round_intro', 'round_complete', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'winners', 'tiebreak', 'blank', 'splash'].includes(state) && (
         <p className="text-4xl text-gray-500">Standby…</p>
       )}
 
