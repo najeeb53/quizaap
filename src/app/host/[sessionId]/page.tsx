@@ -9,6 +9,7 @@ import {
   gradeAndReveal, setDisplayState, awardManualScore, undoScore,
   eliminateTeam, resetSession, resetCurrentQuestion, resetRound, resetScores,
   fetchPickItems, computeCurrentTierAsync, type TierResult, setCurrentPicker, openCategoryPicks, pickCategory,
+  categoriesPickedByTeam, teamHasExhaustedCategories,
   submitAnswer, startRapidFireTurn, fetchSequenceResults, type SequenceResult,
   passQuestion, fetchPassedTeams, type PassedTeam, PASS_MARKS_CORRECT, declareWinner, resetWinner,
   tiedForElimination, startTiebreak, resolveTiebreak, cancelTiebreak, fetchTiebreakQuestion, judgeAnswerByHost,
@@ -85,6 +86,7 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const [answerTeamId, setAnswerTeamId] = useState<string | null>(null); // host-chosen answering team, for non-pick rounds
   const [passOverrideTeamId, setPassOverrideTeamId] = useState<string | null>(null); // who a pass just handed the question to
   const [passedTeams, setPassedTeams] = useState<PassedTeam[]>([]); // every team that's passed on the current question
+  const [countdownSecs, setCountdownSecs] = useState(60); // stand-alone countdown screen
   const [lockedKey, setLockedKey] = useState<string | null>(null);
   const [locking, setLocking] = useState(false);
   const [ignoreTimeoutFor, setIgnoreTimeoutFor] = useState<string | null>(null); // itemId the host said "let them answer anyway" on
@@ -289,7 +291,10 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   // mid-question, not just passes made in this browser tab).
   useEffect(() => {
     const itemId = session?.current_question_set_item_id;
-    if (!passingAllowed || !itemId) { setPassedTeams([]); return; }
+    // Clear first: the restore effect below must never act on the PREVIOUS question's passes
+    // in the moment before this question's ones have loaded.
+    setPassedTeams([]);
+    if (!passingAllowed || !itemId) return;
     let cancelled = false;
     fetchPassedTeams(sessionId, itemId).then(rows => { if (!cancelled) setPassedTeams(rows); });
     return () => { cancelled = true; };
@@ -308,7 +313,9 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
       const passedIds = new Set(updatedPassed.map(p => p.team_id));
       // A passed question goes round the table in the same seating order as everything else, so
       // "next" means the team physically next along rather than an alphabetical accident.
-      const next = seatedTeams.find(t => !passedIds.has(t.team_id));
+      // It starts from the seat AFTER the team that just passed — this used to take the first
+      // un-passed team from the top of the seating order, so every pass landed on seat 1.
+      const next = nextTeamAfterPass(passingTeamId, passedIds);
       if (next) {
         setPassOverrideTeamId(next.team_id);
         setAnswerTeamId(next.team_id);
@@ -617,13 +624,16 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   async function handlePick(categoryId: string) {
     if (!session?.current_picker_team_id || !tier.nextItemId) return;
     try {
-      await pickCategory(sessionId, tier.nextItemId, session.current_picker_team_id, categoryId);
+      await pickCategory(sessionId, tier.nextItemId, session.current_picker_team_id, categoryId, pickerExhausted);
     } catch (e: any) {
       alert(e.message || 'Failed to pick that category.');
     }
   }
 
   const remaining = timerRemaining();
+  // Subjects the team whose turn it is has already picked this round — disabled on the grid.
+  const pickerUsedCategories = categoriesPickedByTeam(pickItems, session?.current_picker_team_id);
+  const pickerExhausted = teamHasExhaustedCategories(tier, pickerUsedCategories);
   const rapidFireActive = remaining !== null && remaining > 0 && !rapidLocked;
   const activeTeams = scoreboard.filter(t => !t.eliminated);
   // The scoreboard is sorted by points — right for the standings, wrong for "whose turn is it".
@@ -636,6 +646,29 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
   const tiebreakTeams = (((session?.tiebreak as TiebreakState | null)?.team_ids) || [])
     .map(id => activeTeams.find(t => t.team_id === id))
     .filter((t): t is ScoreRow => !!t);
+
+  /** The team a passed question goes to: walk the seating order starting from the seat after
+   * `passerId`, wrapping round, and take the first team that hasn't passed on it yet. */
+  function nextTeamAfterPass(passerId: string, passedIds: Set<string>): ScoreRow | undefined {
+    const n = seatedTeams.length;
+    const idx = seatedTeams.findIndex(t => t.team_id === passerId);
+    for (let i = 1; i <= n; i++) {
+      const t = seatedTeams[(idx + i + n) % n];
+      if (!passedIds.has(t.team_id)) return t;
+    }
+    return undefined;
+  }
+
+  // Who a question was passed to used to live only in this tab's memory, so a host refresh
+  // mid-question handed it back to the team that had already passed. Rebuild it from the pass
+  // records instead: the last team to pass, then the next seat along.
+  useEffect(() => {
+    if (passOverrideTeamId || passedTeams.length === 0 || session?.display_state !== 'question') return;
+    const passedIds = new Set(passedTeams.map(p => p.team_id));
+    const next = nextTeamAfterPass(passedTeams[passedTeams.length - 1].team_id, passedIds);
+    if (next) { setPassOverrideTeamId(next.team_id); setAnswerTeamId(next.team_id); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [passedTeams, passOverrideTeamId, session?.display_state, seatedTeams.length]);
 
   if (!session) return <p className="text-gray-400">Loading session…</p>;
 
@@ -1057,13 +1090,21 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                     </span>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
-                    {tier.categories.map(c => (
-                      <button key={c.category_id} onClick={() => handlePick(c.category_id)} disabled={!session.current_picker_team_id}
-                        className={`bg-[#2563eb] hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition-all rounded-lg p-3 text-sm font-semibold text-white shadow-md ${arabicClass(c.category_name)}`}>
-                        {c.category_name}
-                      </button>
-                    ))}
+                    {tier.categories.map(c => {
+                      const used = pickerUsedCategories.has(c.category_id) && !pickerExhausted;
+                      return (
+                        <button key={c.category_id} onClick={() => handlePick(c.category_id)} disabled={!session.current_picker_team_id || used}
+                          title={used ? 'This team already picked this subject in this round' : undefined}
+                          className={`${used ? 'bg-gray-700 line-through' : 'bg-[#2563eb] hover:brightness-110'} disabled:opacity-40 disabled:cursor-not-allowed transition-all rounded-lg p-3 text-sm font-semibold text-white shadow-md ${arabicClass(c.category_name)}`}>
+                          {c.category_name}
+                          {used && <span className="block text-[10px] font-normal no-underline opacity-80">already picked</span>}
+                        </button>
+                      );
+                    })}
                   </div>
+                  {pickerExhausted && (
+                    <p className="text-xs text-amber-300 mt-2">This team has already picked every subject available — repeats are allowed for this pick.</p>
+                  )}
                 </>
               )}
             </div>
@@ -1081,7 +1122,17 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
                 {question ? 'Next Question' : 'Show First Question'}
               </button>
             )}
-            {round?.team_picks_category && question && session.display_state === 'answer_reveal' && (
+            {/* Picking rounds had no way to END: "Next Question" (which moves a plain round to
+                round_complete) isn't shown for them, so the Round-complete panel — and with it the
+                elimination controls and the ⚖️ Run Tie-break button — was unreachable. Offered once
+                every slot is picked and the last answer is revealed, so no question's score is skipped. */}
+            {round?.team_picks_category && question && tier.done && session.display_state === 'answer_reveal' && (
+              <button onClick={() => { if (confirm('Finish this round? All questions have been played.')) setDisplayState(sessionId, 'round_complete'); }}
+                className="bg-emerald-600 hover:bg-emerald-500 transition-all px-3 py-1.5 rounded-lg text-sm font-bold text-white shadow-md">
+                ✓ Finish Round
+              </button>
+            )}
+            {round?.team_picks_category && question && !tier.done && session.display_state === 'answer_reveal' && (
               <button onClick={() => openCategoryPicks(sessionId)} className="bg-[#2563eb] hover:brightness-110 transition-all px-3 py-1.5 rounded-lg text-sm font-semibold text-white shadow-md">
                 Back to Category Picks
               </button>
@@ -1133,6 +1184,35 @@ export default function HostPage({ params }: { params: Promise<{ sessionId: stri
               {session.display_state === 'splash' ? 'Hide Splash' : 'Show Splash'}
             </button>
             <button onClick={() => setDisplayState(sessionId, 'blank')} className="bg-black border border-gray-600 hover:bg-gray-900 transition-all px-3 py-1.5 rounded-lg text-sm font-medium text-white">Blank Display</button>
+          </div>
+
+          {/* Stand-alone countdown: the projector shows nothing but a big timer. Uses the same
+              shared timer as questions (so every screen stays in sync and Pause works the same
+              way); hiding it clears the timer so it can't leak into the next question. */}
+          <div className="flex flex-wrap items-center gap-2 mb-4 rounded-xl border border-gray-700/60 bg-black/20 px-3 py-2">
+            <span className="text-sm font-semibold text-gray-300">⏱ Countdown screen</span>
+            <input type="number" min={1} max={3600} value={countdownSecs}
+              onChange={e => setCountdownSecs(Math.max(1, Math.min(3600, parseInt(e.target.value) || 1)))}
+              className="w-20 bg-gray-900 border border-gray-600 rounded-lg p-1.5 text-sm text-gray-200 tabular-nums" />
+            <span className="text-sm text-gray-400">seconds</span>
+            <button onClick={async () => { await startTimer(sessionId, countdownSecs); await setDisplayState(sessionId, 'countdown'); }}
+              className="bg-[#10b981] hover:brightness-110 transition-all px-3 py-1.5 rounded-lg text-sm font-semibold text-white shadow-md">
+              ▶ {session.display_state === 'countdown' ? 'Restart' : 'Show & Start'}
+            </button>
+            {session.display_state === 'countdown' && (
+              <>
+                {session.timer_state?.paused ? (
+                  <button onClick={() => startTimer(sessionId, Math.max(1, remaining ?? countdownSecs))}
+                    className="bg-[#f59e0b] hover:brightness-110 transition-all px-3 py-1.5 rounded-lg text-sm font-semibold text-white shadow-md">▶ Resume</button>
+                ) : (
+                  <button onClick={() => remaining !== null && pauseTimer(sessionId, remaining)} disabled={remaining === null || remaining === 0}
+                    className="bg-[#f59e0b] hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition-all px-3 py-1.5 rounded-lg text-sm font-semibold text-white shadow-md">⏸ Pause</button>
+                )}
+                <button onClick={async () => { await resetTimer(sessionId); await setDisplayState(sessionId, 'question'); }}
+                  className="bg-gray-600 hover:bg-gray-500 transition-all px-3 py-1.5 rounded-lg text-sm font-medium text-white">Hide Countdown</button>
+                <span className="px-3 py-1.5 bg-black border border-gray-700 rounded-lg text-sm font-mono text-white tabular-nums">{remaining ?? '--'}s</span>
+              </>
+            )}
           </div>
 
           {round?.buzzer_enabled && (

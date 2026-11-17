@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef, use } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { hashPin } from '@/lib/pin';
-import { submitBuzz, submitAnswer, submitSequenceAnswer, fetchPickItems, computeCurrentTierAsync, pickCategory, type PickItem, type TierResult } from '@/lib/liveEngine';
+import { submitBuzz, submitAnswer, submitSequenceAnswer, fetchPickItems, computeCurrentTierAsync, pickCategory, categoriesPickedByTeam, teamHasExhaustedCategories, type PickItem, type TierResult } from '@/lib/liveEngine';
 import { arabicClass, arabicDir } from '@/lib/textDir';
 import { questionTypeForRound } from '@/lib/questionSet';
 import { playBuzzSound } from '@/lib/buzzSound';
@@ -428,6 +428,8 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
   // picture round with the buzzer switched off is a normal round the host works round the table.
   const isBuzzerRound = buzzerEnabled;
   const isMyTurn = teamPicksCategory && team && sessionData?.current_picker_team_id === team.id;
+  const myUsedCategories = categoriesPickedByTeam(pickItems, team?.id);
+  const myCategoriesExhausted = teamHasExhaustedCategories(tier, myUsedCategories);
   const questionMedia = questionImages(question);
 
   const rapidFireRemaining = remaining;
@@ -483,13 +485,17 @@ export default function TeamPage({ params }: { params: Promise<{ teamCode: strin
                 Difficulty: {tier.difficulty}
               </span>
               <div className="grid grid-cols-2 gap-3">
-                {tier.categories.map(c => (
-                  <button key={c.category_id} disabled
-                    className={`relative bg-gray-100 text-gray-400 border border-gray-200 rounded-xl p-4 font-semibold cursor-not-allowed ${arabicClass(c.category_name)}`}>
-                    <span className="absolute top-1.5 right-1.5 text-xs">🔒</span>
-                    {c.category_name}
-                  </button>
-                ))}
+                {tier.categories.map(c => {
+                  const used = myUsedCategories.has(c.category_id) && !myCategoriesExhausted;
+                  return (
+                    <button key={c.category_id} disabled
+                      className={`relative ${used ? 'bg-gray-50 text-gray-300 line-through' : 'bg-gray-100 text-gray-400'} border border-gray-200 rounded-xl p-4 font-semibold cursor-not-allowed ${arabicClass(c.category_name)}`}>
+                      <span className="absolute top-1.5 right-1.5 text-xs">🔒</span>
+                      {c.category_name}
+                      {used && <span className="block text-xs font-normal no-underline mt-1">You already picked this</span>}
+                    </button>
+                  );
+                })}
               </div>
               <p className="text-sm text-gray-600 mt-5 bg-orange-50 border border-orange-100 rounded-xl py-2 px-3 font-medium">📢 Call out your category choice — the host will select it for you.</p>
             </>

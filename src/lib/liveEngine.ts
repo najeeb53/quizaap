@@ -225,6 +225,21 @@ export async function computeCurrentTierAsync(items: PickItem[], allowedCategory
   return { difficulty: null, categories: [], nextItemId: null, done: true };
 }
 
+/** Categories this team has already picked earlier in the round. A team may not pick the same
+ * subject twice in one round — the host grid, the projector and the team's tablet all grey these
+ * out for whoever's turn it is, and pickCategory refuses them as the final word. */
+export function categoriesPickedByTeam(items: PickItem[], teamId: string | null | undefined): Set<string> {
+  if (!teamId) return new Set();
+  return new Set(items.filter(i => i.picked_by_team_id === teamId && i.category_id).map(i => i.category_id as string));
+}
+
+/** True when every category on offer at this tier has already been used by this team — then the
+ * no-repeat rule is lifted for that pick, rather than leaving the team stuck with nothing to
+ * choose (e.g. a round with more picks per team than categories). */
+export function teamHasExhaustedCategories(tier: TierResult, used: Set<string>): boolean {
+  return tier.categories.length > 0 && tier.categories.every(c => used.has(c.category_id));
+}
+
 export async function setCurrentPicker(sessionId: string, teamId: string | null) {
   const { error } = await supabase.from('live_sessions').update({ current_picker_team_id: teamId }).eq('id', sessionId);
   if (error) throw error;
@@ -248,7 +263,7 @@ export async function openCategoryPicks(sessionId: string) {
 /** itemId is a free slot at the current tier (from computeCurrentTierAsync's nextItemId);
  * categoryId is the team's free choice. Assigns a random not-yet-used question from that
  * category+tier to the slot and reveals it. */
-export async function pickCategory(sessionId: string, itemId: string, teamId: string, categoryId: string) {
+export async function pickCategory(sessionId: string, itemId: string, teamId: string, categoryId: string, allowRepeat = false) {
   const { data: item } = await supabase.from('question_set_items').select('id, question_set_id, difficulty, picked_by_team_id').eq('id', itemId).single();
   if (!item) throw new Error('Question slot not found.');
   if (item.picked_by_team_id) throw new Error('That slot has already been picked.');
@@ -262,6 +277,14 @@ export async function pickCategory(sessionId: string, itemId: string, teamId: st
     .eq('question_set_id', item.question_set_id)
     .not('question_id', 'is', null);
   const usedIds = (existing || []).map((r: any) => r.question_id);
+
+  // No repeats: a team can't pick a subject it already picked this round. allowRepeat is only
+  // passed when that team has used up every subject on offer (see teamHasExhaustedCategories).
+  if (!allowRepeat) {
+    const { data: mine } = await supabase.from('question_set_items').select('id')
+      .eq('question_set_id', item.question_set_id).eq('picked_by_team_id', teamId).eq('category_id', categoryId).limit(1);
+    if (mine && mine.length > 0) throw new Error('This team has already picked that subject this round — choose a different one.');
+  }
 
   // Must match the round's question type, or a Sequencing/Picture pick round gets handed a text
   // MCQ that its UI can't render and its grader can't mark.

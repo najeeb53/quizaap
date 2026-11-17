@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef, use } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { fetchScoreboard, type ScoreRow } from '@/lib/scoreboard';
-import { fetchPickItems, computeCurrentTierAsync, fetchSequenceResults, fetchWinner, fetchTiebreakQuestion, type PickItem, type TierResult, type SequenceResult, type WinnerInfo, type TiebreakState, type TiebreakQuestion } from '@/lib/liveEngine';
+import { fetchPickItems, computeCurrentTierAsync, categoriesPickedByTeam, teamHasExhaustedCategories, fetchSequenceResults, fetchWinner, fetchTiebreakQuestion, type PickItem, type TierResult, type SequenceResult, type WinnerInfo, type TiebreakState, type TiebreakQuestion } from '@/lib/liveEngine';
 import { questionTypeForRound } from '@/lib/questionSet';
 import { arabicClass, arabicDir, containsArabic } from '@/lib/textDir';
 import { playBuzzAlert } from '@/lib/buzzSound';
@@ -413,11 +413,21 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
                 {pickerTeamName ? `${pickerTeamName}'s turn to pick a category` : 'Choose a category…'}
               </h2>
               <div className="grid grid-cols-3 gap-6 max-w-4xl mx-auto">
-                {tier.categories.map(c => (
-                  <div key={c.category_id} className={`bg-gradient-to-br from-blue-900 to-blue-950 rounded-2xl p-8 text-2xl font-semibold border border-gray-700/50 border-l-4 border-l-teal-400 shadow-xl ${arabicClass(c.category_name)}`}>
-                    {c.category_name}
-                  </div>
-                ))}
+                {(() => {
+                  // Subjects the team whose turn it is already picked this round are shown dimmed,
+                  // so the hall can see why that team can't choose them again.
+                  const used = categoriesPickedByTeam(pickItems, sessionData?.current_picker_team_id);
+                  const exhausted = teamHasExhaustedCategories(tier, used);
+                  return tier.categories.map(c => {
+                    const isUsed = used.has(c.category_id) && !exhausted;
+                    return (
+                      <div key={c.category_id} className={`rounded-2xl p-8 text-2xl font-semibold border shadow-xl ${isUsed ? 'bg-gray-900/60 border-gray-800 text-gray-600 line-through' : 'bg-gradient-to-br from-blue-900 to-blue-950 border-gray-700/50 border-l-4 border-l-teal-400'} ${arabicClass(c.category_name)}`}>
+                        {c.category_name}
+                        {isUsed && <span className="block text-base font-normal no-underline mt-2 text-gray-500">already chosen</span>}
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             </>
           )}
@@ -560,13 +570,26 @@ export default function DisplayPage({ params }: { params: Promise<{ sessionId: s
         </div>
       )}
 
+      {/* Stand-alone countdown from the host console — nothing on screen but the timer.
+          mm:ss once it's a minute or more, plain seconds below that. */}
+      {state === 'countdown' && (() => {
+        const r = remaining ?? 0;
+        const label = remaining === null ? '--' : r >= 60 ? `${Math.floor(r / 60)}:${String(r % 60).padStart(2, '0')}` : String(r);
+        const tone = remaining !== null && r <= 5 ? 'text-red-400 animate-pulse' : remaining !== null && r <= 10 ? 'text-amber-300' : 'text-white';
+        return (
+          <div className="fixed inset-0 z-40 flex items-center justify-center bg-black">
+            <span className={`font-mono font-bold tabular-nums leading-none text-[28vw] ${tone}`}>{label}</span>
+          </div>
+        );
+      })()}
+
       {state === 'blank' && <div className="w-full h-[60vh]" />}
 
       {/* Fallbacks, so the projector never sits on a completely blank screen — which looks
           identical to a crash from the back of the room. */}
       {state === 'question' && !question && <p className="text-4xl text-gray-500">Loading question…</p>}
       {state === 'round_intro' && !round && <p className="text-4xl text-gray-500">Loading round…</p>}
-      {!['idle', 'round_intro', 'round_complete', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'winners', 'tiebreak', 'blank', 'splash'].includes(state) && (
+      {!['idle', 'round_intro', 'round_complete', 'category_pick', 'question', 'buzzer_open', 'answer_reveal', 'rapid_fire', 'scoreboard', 'winners', 'tiebreak', 'blank', 'splash', 'countdown'].includes(state) && (
         <p className="text-4xl text-gray-500">Standby…</p>
       )}
 
